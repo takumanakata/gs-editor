@@ -37,7 +37,7 @@ export class NumField {
     el.addEventListener("pointerdown", (e) => {
       if (this.editing || e.button !== 0) return;
       down = { x: e.clientX, v0: this.value, moved: false, id: e.pointerId };
-      el.setPointerCapture(e.pointerId);
+      try { el.setPointerCapture(e.pointerId); } catch { /* synthetic pointer */ }
       e.preventDefault();
     });
     el.addEventListener("pointermove", (e) => {

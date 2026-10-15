@@ -37,7 +37,12 @@ export class HistoryPanel {
       `<div class="hrow${k + 1 === pos ? " on" : ""}${r.applied ? "" : " future"}" data-i="${k + 1}" title="${r.applied ? "ここまで戻す" : "ここまでやり直す"}">${esc(r.label)}</div>`).join("");
     this.note.classList.toggle("hidden", h.dropped === 0);
     if (h.dropped > 0) this.note.textContent = `古い ${h.dropped} 件はメモリ節約のため破棄しました（最大 ${(h.constructor as any).MAX} 件）`;
+    // keep the current row visible inside the list only (scrollIntoView would also scroll the dock)
     const cur = this.list.querySelector(".hrow.on") as HTMLElement | null;
-    cur?.scrollIntoView({ block: "nearest" });
+    if (cur) {
+      const top = cur.offsetTop - this.list.offsetTop, bottom = top + cur.offsetHeight;
+      if (top < this.list.scrollTop) this.list.scrollTop = top;
+      else if (bottom > this.list.scrollTop + this.list.clientHeight) this.list.scrollTop = bottom - this.list.clientHeight;
+    }
   }
 }

@@ -200,6 +200,7 @@ export class SplatEditor {
   }
   selectAll() { if (!this._ready) return; for (let i = 0; i < this.n; i++) if (!this.hiddenFlag[i]) this.setSel(i, true); this.ps.needsUpdate = true; }
   deselectAll() { if (!this._ready || !this.selCount) return; for (let i = 0; i < this.n; i++) this.setSel(i, false); this.ps.needsUpdate = true; }
+  invertSelection() { if (!this._ready) return; for (let i = 0; i < this.n; i++) if (!this.hiddenFlag[i]) this.setSel(i, !this.selFlag[i]); this.ps.needsUpdate = true; }
   selectedIndices(): number[] { const out: number[] = []; if (!this._ready) return out; for (let i = 0; i < this.n; i++) if (this.selFlag[i]) out.push(i); return out; }
 
   // ── hide / show (delete is "hide the selection") ───────────────────────

@@ -19,22 +19,23 @@ export class ViewCube {
     const el = document.createElement("div");
     el.id = "viewcube";
     el.innerHTML = `<div class="vc-scene"><div class="vc-cube">
-      <div class="vc-face vc-front" data-v="front">前<small>Front</small></div>
-      <div class="vc-face vc-back" data-v="back">後<small>Back</small></div>
-      <div class="vc-face vc-right" data-v="right">右<small>Right</small></div>
-      <div class="vc-face vc-left" data-v="left">左<small>Left</small></div>
-      <div class="vc-face vc-top" data-v="top">上<small>Top</small></div>
-      <div class="vc-face vc-bottom" data-v="bottom">下<small>Bottom</small></div>
+      <div class="vc-face vc-front" data-v="front">Front</div>
+      <div class="vc-face vc-back" data-v="back">Back</div>
+      <div class="vc-face vc-right" data-v="right">Right</div>
+      <div class="vc-face vc-left" data-v="left">Left</div>
+      <div class="vc-face vc-top" data-v="top">Top</div>
+      <div class="vc-face vc-bottom" data-v="bottom">Bottom</div>
     </div></div>`;
     host.appendChild(el);
     this.el = el;
     this.cube = el.querySelector(".vc-cube") as HTMLElement;
 
     // click = snap to the face; a drag (> 4 px) orbits the main view instead
-    let down: { x: number; y: number; dragging: boolean } | null = null;
+    let down: { x: number; y: number; dragging: boolean; face: ViewName | null } | null = null;
     el.addEventListener("pointerdown", (e) => {
       if (e.button !== 0) return;
-      down = { x: e.clientX, y: e.clientY, dragging: false };
+      const f = (e.target as HTMLElement).closest(".vc-face") as HTMLElement | null; // before capture retargets events
+      down = { x: e.clientX, y: e.clientY, dragging: false, face: (f?.dataset.v as ViewName) || null };
       el.setPointerCapture(e.pointerId);
       e.preventDefault();
     });
@@ -46,7 +47,7 @@ export class ViewCube {
     el.addEventListener("pointerup", (e) => {
       if (!down) return;
       if (down.dragging) onDrag("up", e.clientX, e.clientY);
-      else { const f = (e.target as HTMLElement).closest(".vc-face") as HTMLElement | null; if (f) onView(f.dataset.v as ViewName); }
+      else if (down.face) onView(down.face);
       down = null;
     });
   }
@@ -56,7 +57,8 @@ export class ViewCube {
     const q = camera.quaternion.clone().invert();
     this.m.makeRotationFromQuaternion(q);
     const e = this.m.elements;
-    // CSS matrix3d is column-major like three.js; flip the Y row for the screen's Y-down
-    this.cube.style.transform = `matrix3d(${e[0]},${-e[1]},${e[2]},0, ${e[4]},${-e[5]},${e[6]},0, ${e[8]},${-e[9]},${e[10]},0, 0,0,0,1)`;
+    // CSS space has Y down: conjugate the rotation by a Y flip (F·R·F) so handedness is
+    // kept and the faces read the right way round. Column-major, like three.js.
+    this.cube.style.transform = `matrix3d(${e[0]},${-e[1]},${e[2]},0, ${-e[4]},${e[5]},${-e[6]},0, ${e[8]},${-e[9]},${e[10]},0, 0,0,0,1)`;
   }
 }

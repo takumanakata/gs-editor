@@ -50,7 +50,9 @@ export class NavControls {
     // mouseButtons.MIDDLE at pointerdown, so set it just before it looks.
     dom.addEventListener("pointerdown", (e) => {
       if (e.button !== 1) return;
-      this.orbit.mouseButtons.MIDDLE = e.shiftKey ? THREE.MOUSE.PAN : e.ctrlKey ? THREE.MOUSE.DOLLY : THREE.MOUSE.ROTATE;
+      // OrbitControls itself turns Shift+ROTATE into a pan (and Shift+PAN back into a
+      // rotate!), so the only remap needed is Ctrl → dolly
+      this.orbit.mouseButtons.MIDDLE = e.ctrlKey ? THREE.MOUSE.DOLLY : THREE.MOUSE.ROTATE;
       if (!e.shiftKey && !e.ctrlKey) {
         const p = this.pivotProvider?.(e.clientX, e.clientY);
         if (p) this.setPivot(p);
@@ -158,6 +160,7 @@ export class NavControls {
     const init: PointerEventInit = { bubbles: true, cancelable: true, pointerId: 999, pointerType: "mouse", isPrimary: true, clientX: x, clientY: y, button: phase === "move" ? -1 : 1, buttons: phase === "up" ? 0 : 4 };
     const type = phase === "down" ? "pointerdown" : phase === "move" ? "pointermove" : "pointerup";
     if (phase === "down") { this.orbit.mouseButtons.MIDDLE = THREE.MOUSE.ROTATE; this.onRotateStart?.(); }
+    // a synthetic drag from the view cube must not be read as "Shift held" — the init has no modifiers
     this.dom.dispatchEvent(new PointerEvent(type, init));
   }
 
