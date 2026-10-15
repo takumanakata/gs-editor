@@ -1,6 +1,6 @@
 export type Tool = "select" | "move" | "rotate" | "scale" | "origin";
 export type SelectVariant = "box" | "circle" | "lasso";
-export type CtxAction = "delete" | "invert" | "selectAll" | "deselect" | "setOrigin" | "focus" | "restoreAll";
+export type CtxAction = "delete" | "invert" | "selectAll" | "deselect" | "setOrigin" | "focus";
 export type ObjectAction = "activate" | "toggle" | "remove";
 export type VolumeKind = "box" | "sphere";
 
@@ -13,6 +13,8 @@ export interface EditorCallbacks {
   onContext: (a: CtxAction) => void;
   onObject: (a: ObjectAction, id: number) => void;
   onAddVolume: (kind: VolumeKind) => void;
+  onDimsVisible: (on: boolean) => void;
+  onVolumeShow: (on: boolean) => void;
 }
 
 export interface SceneInfo { name: string; format: string; bytes: number; total: number; visible: number; sceneTotal: number }
@@ -50,7 +52,8 @@ export class Editor {
   private rect: HTMLElement; private circle: HTMLElement; private lassoSvg: HTMLElement; private lasso: SVGPathElement;
   private ctx: HTMLElement;
   private numEl: HTMLElement;
-  private dims: { w: HTMLElement; d: HTMLElement; h: HTMLElement };
+  private dims: { w: HTMLElement; d: HTMLElement; h: HTMLElement; chk: HTMLInputElement };
+  private volShow: HTMLInputElement;
   private dimLbls: HTMLElement[];
   private info: { name: HTMLElement; format: HTMLElement; size: HTMLElement; splats: HTMLElement; note: HTMLElement; replace: HTMLButtonElement };
   private objList: HTMLElement;
@@ -74,21 +77,18 @@ export class Editor {
         <div class="tgroup">${TOOLS.map((t) => `<button class="tbtn" data-tool="${t.id}" title="${t.label} (${t.key})"><i class="ti ${t.icon}"></i></button>`).join("")}</div>
         <div class="tsep"></div>
         <div class="tgroup">
-          <button class="tbtn" id="t-add" title="Add a clip volume"><i class="ti ti-plus"></i><span class="tri"></span></button>
-          <div id="addfly" class="glass hidden">
-            <button class="fbtn" data-add="box"><i class="ti ti-cube"></i> Box Volume</button>
-            <button class="fbtn" data-add="sphere"><i class="ti ti-sphere"></i> Sphere Volume</button>
-          </div>
+          <button class="tbtn" data-add="box" title="Add a Box Volume (hides splats outside it)"><i class="ti ti-cube"></i></button>
+          <button class="tbtn" data-add="sphere" title="Add a Sphere Volume (hides splats outside it)"><i class="ti ti-sphere"></i></button>
         </div>
       </nav>
 
       <aside id="dock" class="glass">
-        <section class="dsec pinned" id="dsec-objects"><h3><i class="ti ti-list-tree"></i>Outliner <span class="dim">click to make active</span></h3><div class="dbody"><div id="obj-list"></div></div></section>
         <section class="dsec" id="dsec-intake"><h3><i class="ti ti-chevron-down"></i>読み込み</h3><div class="dbody" id="dock-intake"></div></section>
-        <section class="dsec" id="dsec-volume"><h3><i class="ti ti-chevron-down"></i>Clip Volume</h3><div class="dbody" id="dock-volume"></div></section>
+        <section class="dsec pinned" id="dsec-objects"><h3><i class="ti ti-list-tree"></i>Outliner <span class="dim">click to make active</span></h3><div class="dbody"><div id="obj-list"></div></div></section>
+        <section class="dsec" id="dsec-volume"><h3><i class="ti ti-chevron-down"></i>Clip Volume <label class="chk"><input type="checkbox" id="vol-show-chk"> Show</label></h3><div class="dbody" id="dock-volume"></div></section>
         <section class="dsec" id="dsec-transform"><h3><i class="ti ti-chevron-down"></i>Transform <span class="dim">Blender axes (Z up)</span></h3><div class="dbody" id="dock-transform"></div></section>
         <section class="dsec" id="dsec-dims">
-          <h3><i class="ti ti-chevron-down"></i>Dimensions</h3>
+          <h3><i class="ti ti-chevron-down"></i>Dimensions <label class="chk" title="Draw the box and its sizes in the viewport"><input type="checkbox" id="dims-chk"> Show</label></h3>
           <div class="dbody">
             <div class="kv"><span>Width X</span><b id="dim-w">—</b><span>Depth Y</span><b id="dim-d">—</b><span>Height Z</span><b id="dim-h">—</b></div>
             <div class="note">Body of the active object, stray splats excluded</div>
@@ -102,7 +102,7 @@ export class Editor {
             <div class="note" id="inf-note">Up to ~1M splats is comfortable in the browser; 3M+ gets heavy.</div>
           </div>
         </section>
-        <section class="dsec" id="dsec-history"><h3><i class="ti ti-chevron-down"></i>編集履歴 <span class="dim">クリックで戻る</span></h3><div class="dbody" id="dock-history"></div></section>
+        <section class="dsec" id="dsec-history"><h3><i class="ti ti-chevron-down"></i>History <span class="dim">クリックで戻る</span></h3><div class="dbody" id="dock-history"></div></section>
         <section class="dsec" id="dsec-export">
           <div class="exp-row"><select id="exp-fmt"><option value="spz">.spz — small file</option><option value="ply">.ply — universal</option><option value="splat">.splat — base color only</option></select></div>
           <button class="cta big" id="exp-go" title="Save all visible objects as one file with deletions, origins, rotations and scales baked in"><i class="ti ti-download"></i> Export</button>
@@ -125,8 +125,6 @@ export class Editor {
           <hr>
           <button data-act="setOrigin"><i class="ti ti-focus-centered"></i>Set Origin Here</button>
           <button data-act="focus"><i class="ti ti-zoom-in-area"></i>Focus Here</button>
-          <hr>
-          <button data-act="restoreAll"><i class="ti ti-refresh"></i>Restore All Deleted</button>
         </div>
         <div id="loader"><div class="ld-ring"></div><div class="ld-text">Loading…</div></div>
       </div>
@@ -135,17 +133,17 @@ export class Editor {
     const q = <T extends HTMLElement>(id: string) => ui.querySelector("#" + id) as T;
     const ov = q("overlay");
     this.mounts = { intake: q("dock-intake"), transform: q("dock-transform"), volume: q("dock-volume"), history: q("dock-history"), overlay: ov };
-    // "+" on the rail: a flyout with the volume kinds; click one to add it to the outliner
-    const addBtn = q<HTMLButtonElement>("t-add"), addFly = q("addfly");
-    addBtn.onclick = (e) => { e.stopPropagation(); addFly.classList.toggle("hidden"); };
-    addFly.querySelectorAll<HTMLButtonElement>("[data-add]").forEach((b) => (b.onclick = () => { addFly.classList.add("hidden"); cb.onAddVolume(b.dataset.add as VolumeKind); }));
-    document.addEventListener("pointerdown", (e) => { if (!addFly.contains(e.target as Node) && !addBtn.contains(e.target as Node)) addFly.classList.add("hidden"); }, { capture: true });
+    ui.querySelectorAll<HTMLButtonElement>("#tools [data-add]").forEach((b) => (b.onclick = () => cb.onAddVolume(b.dataset.add as VolumeKind)));
     this.hint = q("st-hint"); this.msg = q("st-msg"); this.selPill = q("st-sel");
     this.loader = q("loader"); this.rect = q("selrect"); this.circle = q("selcircle");
     this.lassoSvg = q("lasso"); this.lasso = this.lassoSvg.querySelector("path") as SVGPathElement;
     this.ctx = q("ctxmenu"); this.numEl = q("numinput");
     this.fmtSel = q("exp-fmt"); this.replacePick = q("replace-pick");
-    this.dims = { w: q("dim-w"), d: q("dim-d"), h: q("dim-h") };
+    this.dims = { w: q("dim-w"), d: q("dim-d"), h: q("dim-h"), chk: q("dims-chk") };
+    this.volShow = q("vol-show-chk");
+    this.dims.chk.onchange = () => cb.onDimsVisible(this.dims.chk.checked);
+    this.volShow.onchange = () => cb.onVolumeShow(this.volShow.checked);
+    for (const id of ["dsec-dims", "dsec-info", "dsec-history"]) q(id).classList.add("closed"); // collapsed by default
     this.dimLbls = Array.from(ov.querySelectorAll(".dimlbl")) as HTMLElement[];
     this.info = { name: q("inf-name"), format: q("inf-format"), size: q("inf-size"), splats: q("inf-splats"), note: q("inf-note"), replace: q("inf-replace") };
     this.objList = q("obj-list");
@@ -225,6 +223,8 @@ export class Editor {
   }
   setSelection(n: number) { this.selPill.textContent = n ? `${n.toLocaleString()} selected` : ""; }
   setLoading(b: boolean) { this.loader.classList.toggle("show", b); }
+  get dimsVisible() { return this.dims.chk.checked; }
+  setVolumeShow(on: boolean) { this.volShow.checked = on; }
   setDims(d: { w: number; d: number; h: number } | null) {
     const f = (v: number) => `${v.toFixed(2)} m`;
     this.dims.w.textContent = d ? f(d.w) : "—"; this.dims.d.textContent = d ? f(d.d) : "—"; this.dims.h.textContent = d ? f(d.h) : "—";
@@ -283,7 +283,7 @@ export class Editor {
   showContextMenu(x: number, y: number, hasSelection: boolean, hasScene: boolean) {
     this.ctx.classList.remove("hidden");
     this.ctx.querySelectorAll<HTMLButtonElement>("[data-act=delete],[data-act=deselect]").forEach((b) => (b.disabled = !hasSelection));
-    this.ctx.querySelectorAll<HTMLButtonElement>("[data-act=invert],[data-act=selectAll],[data-act=setOrigin],[data-act=focus],[data-act=restoreAll]").forEach((b) => (b.disabled = !hasScene));
+    this.ctx.querySelectorAll<HTMLButtonElement>("[data-act=invert],[data-act=selectAll],[data-act=setOrigin],[data-act=focus]").forEach((b) => (b.disabled = !hasScene));
     const r = this.stage.getBoundingClientRect();
     const w = this.ctx.offsetWidth, h = this.ctx.offsetHeight;
     this.ctx.style.left = `${Math.max(0, Math.min(x - r.left, r.width - w - 4))}px`;

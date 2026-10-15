@@ -21,7 +21,7 @@ export interface VolumePanelCallbacks {
 export class VolumePanel {
   readonly el: HTMLElement;
   private vol: ClipVolume | null = null;
-  private name: HTMLInputElement; private mode: HTMLSelectElement; private show: HTMLInputElement;
+  private name: HTMLInputElement; private mode: HTMLSelectElement;
   private center: NumField[] = []; private size: NumField[] = []; private radius: NumField;
   private sizeGrp: HTMLElement; private radGrp: HTMLElement;
 
@@ -31,7 +31,6 @@ export class VolumePanel {
     el.innerHTML = `
       <div class="vp-row"><label>Name</label><input type="text" id="vp-name" spellcheck="false"></div>
       <div class="vp-row"><label>Show</label><select id="vp-mode"><option value="inside">Inside</option><option value="outside">Outside</option></select></div>
-      <div class="vp-row"><label></label><label class="chk"><input type="checkbox" id="vp-show"> Show bounds</label></div>
       <div class="tp-grp"><div class="tp-lbl">Center <span class="dim">m</span></div><div class="tp-fields" id="vp-center"></div></div>
       <div class="tp-grp" id="vp-size-grp"><div class="tp-lbl">Size <span class="dim">m</span></div><div class="tp-fields" id="vp-size"></div></div>
       <div class="tp-grp" id="vp-rad-grp"><div class="tp-lbl">Radius <span class="dim">m</span></div><div class="tp-fields" id="vp-radius"></div></div>
@@ -39,7 +38,7 @@ export class VolumePanel {
     host.appendChild(el);
     this.el = el;
     const q = <T extends HTMLElement>(id: string) => el.querySelector("#" + id) as T;
-    this.name = q("vp-name"); this.mode = q("vp-mode"); this.show = q("vp-show");
+    this.name = q("vp-name"); this.mode = q("vp-mode");
     this.sizeGrp = q("vp-size-grp"); this.radGrp = q("vp-rad-grp");
     const axes: ("x" | "y" | "z")[] = ["x", "y", "z"];
     const push = (c: boolean) => this.pushFields(c);
@@ -51,7 +50,6 @@ export class VolumePanel {
     this.name.addEventListener("keydown", (e) => e.stopPropagation());
     this.name.onchange = () => { if (this.vol) { this.vol.name = this.name.value.trim() || this.vol.name; cb.onChange(true); } };
     this.mode.onchange = () => { if (this.vol) { this.vol.mode = this.mode.value as VolumeMode; cb.onChange(true); } };
-    this.show.onchange = () => { if (this.vol) { this.vol.showBounds = this.show.checked; cb.onChange(true); } };
   }
 
   private pushFields(commit: boolean) {
@@ -69,7 +67,7 @@ export class VolumePanel {
     this.el.classList.toggle("hidden", !v);
     if (!v) return;
     if (document.activeElement !== this.name) this.name.value = v.name;
-    this.mode.value = v.mode; this.show.checked = v.showBounds;
+    this.mode.value = v.mode;
     const c = toBlenderPos([v.center.x, v.center.y, v.center.z]);
     this.center.forEach((f, i) => f.set(c[i]));
     this.sizeGrp.classList.toggle("hidden", v.kind !== "box"); this.radGrp.classList.toggle("hidden", v.kind !== "sphere");

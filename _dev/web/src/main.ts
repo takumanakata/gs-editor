@@ -31,7 +31,7 @@ type Active = { kind: "object"; obj: GsObject } | { kind: "volume"; vol: ClipVol
 
 const HINTS: Record<string, string> = {
   box: "LMB drag: box select (Shift add, Ctrl subtract)   MMB: orbit   Shift+MMB: pan   Wheel: zoom   X: delete   W: next select tool   RMB: menu",
-  circle: "LMB drag: paint select (Ctrl subtract)   [ ]: radius   MMB: orbit   Shift+MMB: pan   X: delete   W: next select tool",
+  circle: "LMB drag: paint select (Shift add, Ctrl subtract)   Shift+Wheel or [ ]: radius   MMB: orbit   X: delete   W: next select tool",
   lasso: "LMB drag: lasso select (Shift add, Ctrl subtract)   MMB: orbit   Shift+MMB: pan   X: delete   W: next select tool",
   move: "Drag the handles   X / Y / Z: lock an axis   Type a number, Enter   Ctrl: snap   Alt+G: clear   Esc: back to select",
   rotate: "Drag a ring (rotates about the object origin)   X / Y / Z: lock an axis   Type degrees, Enter   Ctrl: 5° steps   Alt+R: clear",
@@ -79,7 +79,6 @@ async function boot() {
       else if (a === "selectAll") { for (const o of shownObjects()) o.edit.selectAll(); syncSelection(); }
       else if (a === "focus") { const p = pickAt(ctxAt.x, ctxAt.y); if (p) nav.focusOn(p.point); }
       else if (a === "setOrigin") { const p = pickAt(ctxAt.x, ctxAt.y); const o = activeObj(); if (p && o) setOriginAt(o, p.point); else editor.setMessage(o ? "Nothing under the cursor — right-click on the scan" : "Make an object active first"); }
-      else if (a === "restoreAll") restoreAll();
     },
     onObject: (a, id) => {
       const o = objects.find((x) => x.id === id), v = volumes.find((x) => x.id === id);
@@ -88,6 +87,8 @@ async function boot() {
       else if (a === "remove") { if (o) removeObject(o); if (v) removeVolume(v); }
     },
     onAddVolume: (kind) => addVolume(kind),
+    onDimsVisible: () => { dimsBox.visible = editor.dimsVisible && !!lastBox; },
+    onVolumeShow: (on) => { const v = activeVol(); if (v) { v.showBounds = on; volumeChanged(v, true); } },
   }, stage, ui);
   const intake = new IntakePanel(editor.mounts.intake, (url, file) => void addObject(url, file.name, file), (t) => editor.setMessage(t));
   stage.addEventListener("dragover", (e) => e.preventDefault());
@@ -218,6 +219,7 @@ async function boot() {
     projectNow();
     gesture = { kind: variant, x0: p.x, y0: p.y, mode: modeOf(e), pts: [p], moved: false };
     try { dom.setPointerCapture(e.pointerId); } catch { /* synthetic pointer */ }
+    if (gesture.mode === "set") for (const o of objects) o.edit.deselectAll();   // plain drag starts a fresh selection
     if (gesture.kind === "circle") { eachShown((o) => o.edit.selectCircle(p.x, p.y, circleR, e.ctrlKey ? "sub" : "add")); syncSelection(); }
     e.preventDefault();
   });
@@ -235,20 +237,28 @@ async function boot() {
     if (clickDown) { // a plain click with a gizmo tool: set the origin (origin tool) or deselect
       const c = clickDown; clickDown = null;
       if (Math.hypot(e.clientX - c.x, e.clientY - c.y) < 4 && !gizmo.dragging) {
-        if (tool === "origin") { const hit = pickAt(e.clientX, e.clientY); const o = activeObj(); if (hit && o) setOriginAt(o, hit.point); }
-        else deselectAll();
+        const hit = pickAt(e.clientX, e.clientY);
+        if (tool === "origin") { const o = activeObj(); if (hit && o) setOriginAt(o, hit.point); }
+        else { deselectAll(); if (!hit) setActive(null); }
       }
     }
     const g = gesture; if (!g) return; gesture = null;
     const p = local(e);
-    if (g.kind === "box") { if (g.moved) eachShown((o) => o.edit.selectRect(g.x0, g.y0, p.x, p.y, g.mode)); else if (g.mode === "set") deselectAll(); }
-    else if (g.kind === "lasso") { if (g.moved && g.pts.length >= 3) eachShown((o) => o.edit.selectLasso(g.pts, g.mode)); else if (!g.moved && g.mode === "set") deselectAll(); }
+    if (g.kind === "box") { if (g.moved) eachShown((o) => o.edit.selectRect(g.x0, g.y0, p.x, p.y, g.mode)); else if (g.mode === "set") { deselectAll(); if (!pickAt(e.clientX, e.clientY)) setActive(null); } }
+    else if (g.kind === "lasso") { if (g.moved && g.pts.length >= 3) eachShown((o) => o.edit.selectLasso(g.pts, g.mode)); else if (!g.moved && g.mode === "set") { deselectAll(); if (!pickAt(e.clientX, e.clientY)) setActive(null); } }
+    else if (!g.moved && g.mode === "set" && !pickAt(e.clientX, e.clientY)) { deselectAll(); setActive(null); }
     editor.hideRect(); editor.hideLasso();
     syncSelection();
   };
   dom.addEventListener("pointerup", endGesture);
   dom.addEventListener("pointercancel", endGesture);
   dom.addEventListener("pointerleave", () => editor.hideCircle());
+  dom.addEventListener("wheel", (e) => {
+    if (!(tool === "select" && variant === "circle" && e.shiftKey)) return;
+    e.preventDefault(); e.stopImmediatePropagation();
+    circleR = Math.min(400, Math.max(6, circleR * (e.deltaY < 0 ? 1.12 : 1 / 1.12)));
+    const r = viewRect(); editor.showCircle(e.clientX - r.left, e.clientY - r.top, circleR);
+  }, { capture: true, passive: false });
   dom.addEventListener("dblclick", (e) => { const hit = pickAt(e.clientX, e.clientY); if (hit) nav.focusOn(hit.point); });
   let ctxAt = { x: 0, y: 0 };
   dom.addEventListener("contextmenu", (e) => { e.preventDefault(); ctxAt = { x: e.clientX, y: e.clientY }; editor.showContextMenu(e.clientX, e.clientY, selectedCount() > 0, objects.length > 0); });
@@ -262,15 +272,6 @@ async function boot() {
     history.push({ label: `削除 (${n.toLocaleString()} 粒)`, undo: () => { for (const d of done) d.o.edit.restore(d.batch); afterEdit(); }, redo: () => { for (const d of done) d.o.edit.hide(d.batch); afterEdit(); } });
     afterEdit();
     editor.setMessage(`Deleted ${n.toLocaleString()} splats (Ctrl+Z to undo)`);
-  }
-  function restoreAll() {
-    const done = objects.map((o) => ({ o, batch: o.edit.hiddenIndices() })).filter((d) => d.batch.length);
-    const n = done.reduce((a, b) => a + b.batch.length, 0);
-    if (!n) { editor.setMessage("Nothing has been deleted"); return; }
-    for (const d of done) d.o.edit.restore(d.batch);
-    history.push({ label: `全部表示に戻す (${n.toLocaleString()} 粒)`, undo: () => { for (const d of done) d.o.edit.hide(d.batch); afterEdit(); }, redo: () => { for (const d of done) d.o.edit.restore(d.batch); afterEdit(); } });
-    afterEdit();
-    editor.setMessage(`Restored ${n.toLocaleString()} splats`);
   }
   const afterEdit = () => { splat.prepare(scene.activeCamera); syncSelection(); scheduleDims(); updateInfo(); refreshOutliner(); };
 
@@ -355,7 +356,7 @@ async function boot() {
     if (activeVol() === v) setActive(objects.length ? { kind: "object", obj: objects[objects.length - 1] } : null);
     scheduleClip(); refreshOutliner();
   }
-  const refreshVolumeLook = () => { for (const v of volumes) { const h = volumeHelpers.get(v.id); if (!h) continue; h.visible = v.showBounds && v.enabled; const fill = h.getObjectByName("fill"); if (fill) fill.visible = activeVol() === v; } };
+  const refreshVolumeLook = () => { for (const v of volumes) { const h = volumeHelpers.get(v.id); if (!h) continue; h.visible = v.showBounds && v.enabled; const fill = h.getObjectByName("fill"); if (fill) fill.visible = activeVol() === v; } const av = activeVol(); if (av) editor.setVolumeShow(av.showBounds); };
   function volumeChanged(v: ClipVolume, _commit: boolean) {
     const h = volumeHelpers.get(v.id);
     if (h) { h.position.copy(v.center); if (v.kind === "box") h.scale.copy(v.size); else h.scale.setScalar(v.radius); }
@@ -433,7 +434,7 @@ async function boot() {
     const size = lastBox.getSize(new THREE.Vector3()), c = lastBox.getCenter(new THREE.Vector3());
     editor.setDims({ w: size.x, d: size.z, h: size.y });   // Blender: X width, Y depth (three −Z), Z height (three Y)
     dimsBox.position.copy(c); dimsBox.scale.copy(size);
-    dimsBox.visible = true;
+    dimsBox.visible = editor.dimsVisible;
   }
   const tmpV = new THREE.Vector3();
   function updateDimLabels() {
