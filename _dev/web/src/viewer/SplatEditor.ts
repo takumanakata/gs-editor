@@ -35,7 +35,15 @@ export class SplatEditor {
   private shown(i: number) { return !this.hiddenFlag[i] && !this.clipFlag[i]; }
   get clippedCount() { let c = 0; for (let i = 0; i < this.n; i++) c += this.clipFlag[i]; return c; }
 
-  /** Row indices (source order) of the splats shown — what the export keeps (clipped ones are left out too). */
+  /** Rows not deleted — what the export keeps (clip volumes are a view aid and do not cut the file). */
+  exportIndices(): Uint32Array {
+    if (!this._ready) return new Uint32Array(0);
+    let m = 0; for (let i = 0; i < this.n; i++) if (!this.hiddenFlag[i]) m++;
+    const out = new Uint32Array(m); let k = 0;
+    for (let i = 0; i < this.n; i++) if (!this.hiddenFlag[i]) out[k++] = i;
+    return out;
+  }
+  /** Rows shown right now (not deleted, not clipped) — for dimensions and picking. */
   visibleIndices(): Uint32Array {
     if (!this._ready) return new Uint32Array(0);
     let m = 0; for (let i = 0; i < this.n; i++) if (this.shown(i)) m++;

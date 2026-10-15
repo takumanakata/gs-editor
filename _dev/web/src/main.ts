@@ -81,7 +81,6 @@ async function boot() {
       else if (a === "setOrigin") { const p = pickAt(ctxAt.x, ctxAt.y); const o = activeObj(); if (p && o) setOriginAt(o, p.point); else editor.setMessage(o ? "Nothing under the cursor — right-click on the scan" : "Make an object active first"); }
       else if (a === "restoreAll") restoreAll();
     },
-    onDimsVisible: (on) => setDimsVisible(on),
     onObject: (a, id) => {
       const o = objects.find((x) => x.id === id), v = volumes.find((x) => x.id === id);
       if (a === "activate") setActive(o ? { kind: "object", obj: o } : v ? { kind: "volume", vol: v } : null);
@@ -323,21 +322,32 @@ async function boot() {
   const volPanel = new VolumePanel(editor.mounts.volume, { onChange: (commit) => { const v = activeVol(); if (v) volumeChanged(v, commit); } });
 
   // ── clip volumes ──
+  const VOL_BLUE = 0x1c7fb0; // C4D-ish deep blue
   function addVolume(kind: VolumeKind) {
-    // start around what is loaded: the active object's box, or a unit box at the origin
-    const box = (activeObj() && lastBox) || splat.getBoundsWorld() || new THREE.Box3(new THREE.Vector3(-1, -1, -1), new THREE.Vector3(1, 1, 1));
-    const c = box.getCenter(new THREE.Vector3()), s = box.getSize(new THREE.Vector3()).multiplyScalar(0.6);
-    const v: ClipVolume = { id: nextId++, name: `${kind === "box" ? "Box" : "Sphere"} ${volumes.filter((x) => x.kind === kind).length + 1}`, kind, center: c, size: new THREE.Vector3(Math.max(0.01, s.x), Math.max(0.01, s.y), Math.max(0.01, s.z)), radius: Math.max(0.01, s.length() / 2), mode: "inside", enabled: true, showBounds: true };
+    const n = volumes.filter((x) => x.kind === kind).length + 1;
+    const v: ClipVolume = { id: nextId++, name: `${kind === "box" ? "BoxVolume" : "SphereVolume"} ${n}`, kind, center: new THREE.Vector3(), size: new THREE.Vector3(2, 2, 2), radius: 1, mode: "inside", enabled: true, showBounds: true };
     volumes.push(v);
-    const helper = kind === "box"
-      ? new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 1, 1)), new THREE.LineBasicMaterial({ color: 0xcfe0bd, transparent: true, opacity: 0.9, depthTest: false }))
-      : new THREE.LineSegments(new THREE.WireframeGeometry(new THREE.SphereGeometry(1, 24, 16)), new THREE.LineBasicMaterial({ color: 0xcfe0bd, transparent: true, opacity: 0.35, depthTest: false }));
-    helper.layers.set(1); helper.renderOrder = 996; scene.scene.add(helper);
+    // outline always (while bounds are on); the translucent body only while the volume is active
+    const helper = new THREE.Group();
+    const lineMat = new THREE.LineBasicMaterial({ color: VOL_BLUE, transparent: true, opacity: 0.95, depthTest: false });
+    const fillMat = new THREE.MeshBasicMaterial({ color: VOL_BLUE, transparent: true, opacity: 0.16, depthWrite: false, side: THREE.DoubleSide });
+    if (kind === "box") {
+      helper.add(new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 1, 1)), lineMat));
+      const fill = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), fillMat); fill.name = "fill"; helper.add(fill);
+    } else {
+      // three great circles read as a sphere without the wireframe mesh
+      const ring = () => new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(Array.from({ length: 64 }, (_, i) => new THREE.Vector3(Math.cos((i / 64) * Math.PI * 2), Math.sin((i / 64) * Math.PI * 2), 0))), lineMat);
+      const r1 = ring(), r2 = ring(), r3 = ring(); r2.rotation.x = Math.PI / 2; r3.rotation.y = Math.PI / 2;
+      helper.add(r1, r2, r3);
+      const fill = new THREE.Mesh(new THREE.SphereGeometry(1, 32, 20), fillMat); fill.name = "fill"; helper.add(fill);
+    }
+    helper.traverse((o) => { o.layers.set(1); o.renderOrder = 996; });
+    scene.scene.add(helper);
     volumeHelpers.set(v.id, helper);
     setActive({ kind: "volume", vol: v });
     volumeChanged(v, true);
     setTool("move");
-    editor.setMessage(`${v.name} added — move / scale it with G / S; everything outside is hidden`);
+    editor.setMessage(`${v.name} added — move / scale it with G / S`);
   }
   function removeVolume(v: ClipVolume) {
     volumes.splice(volumes.indexOf(v), 1);
@@ -345,9 +355,11 @@ async function boot() {
     if (activeVol() === v) setActive(objects.length ? { kind: "object", obj: objects[objects.length - 1] } : null);
     scheduleClip(); refreshOutliner();
   }
+  const refreshVolumeLook = () => { for (const v of volumes) { const h = volumeHelpers.get(v.id); if (!h) continue; h.visible = v.showBounds && v.enabled; const fill = h.getObjectByName("fill"); if (fill) fill.visible = activeVol() === v; } };
   function volumeChanged(v: ClipVolume, _commit: boolean) {
     const h = volumeHelpers.get(v.id);
-    if (h) { h.position.copy(v.center); if (v.kind === "box") h.scale.copy(v.size); else h.scale.setScalar(v.radius); h.visible = v.showBounds && v.enabled; }
+    if (h) { h.position.copy(v.center); if (v.kind === "box") h.scale.copy(v.size); else h.scale.setScalar(v.radius); }
+    refreshVolumeLook();
     if (activeVol() === v && !volPanel.busy) volPanel.set(v);
     if (activeVol() === v) syncProxy();
     scheduleClip(); refreshOutliner();
@@ -401,7 +413,7 @@ async function boot() {
   // ── dimensions (the active object's body box, outliers excluded) + labels in the viewport ──
   const dimsBox = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 1, 1)), new THREE.LineBasicMaterial({ color: 0xffa028, transparent: true, opacity: 0.8, depthTest: false }));
   dimsBox.layers.set(1); dimsBox.renderOrder = 997; dimsBox.visible = false; scene.scene.add(dimsBox);
-  let dimsTimer = 0, dimsOn = false, lastBox: THREE.Box3 | null = null;
+  let dimsTimer = 0, lastBox: THREE.Box3 | null = null;
   const scheduleDims = () => { window.clearTimeout(dimsTimer); dimsTimer = window.setTimeout(computeDims, 180); };
   function computeDims() {
     const o = activeObj();
@@ -421,12 +433,11 @@ async function boot() {
     const size = lastBox.getSize(new THREE.Vector3()), c = lastBox.getCenter(new THREE.Vector3());
     editor.setDims({ w: size.x, d: size.z, h: size.y });   // Blender: X width, Y depth (three −Z), Z height (three Y)
     dimsBox.position.copy(c); dimsBox.scale.copy(size);
-    dimsBox.visible = dimsOn;
+    dimsBox.visible = true;
   }
-  function setDimsVisible(on: boolean) { dimsOn = on; dimsBox.visible = on && !!lastBox; if (!on) editor.setDimLabels([null, null, null]); }
   const tmpV = new THREE.Vector3();
   function updateDimLabels() {
-    if (!dimsOn || !lastBox) return;
+    if (!lastBox || !dimsBox.visible) { editor.setDimLabels([null, null, null]); return; }
     const b = lastBox, r = viewRect();
     const camPos = scene.activeCamera.position;
     const nx = camPos.x > (b.min.x + b.max.x) / 2 ? b.max.x : b.min.x;
@@ -448,7 +459,7 @@ async function boot() {
   const updateInfo = () => {
     const o = activeObj();
     if (!o) { editor.setInfo(null); return; }
-    editor.setInfo({ name: o.source.name, format: (o.source.name.split(".").pop() || "").toLowerCase(), bytes: o.source.file?.size ?? 0, total: o.edit.count, visible: o.edit.count - o.edit.hiddenCount - o.edit.clippedCount, sceneTotal: splat.splatCount });
+    editor.setInfo({ name: o.source.name, format: (o.source.name.split(".").pop() || "").toLowerCase(), bytes: o.source.file?.size ?? 0, total: o.edit.count, visible: o.edit.count - o.edit.hiddenCount, sceneTotal: splat.splatCount });
   };
   const refreshOutliner = () => {
     const rows: ObjectRow[] = [
@@ -466,6 +477,7 @@ async function boot() {
     if (v && (tool === "rotate" || tool === "origin")) setTool("move");
     if (GIZMO_TOOLS.includes(tool)) { if (a) { gizmo.attach(proxy); syncProxy(); } else gizmo.detach(); }
     scene.objOrigin.visible = !!o;
+    refreshVolumeLook();
     computeDims(); updateInfo(); refreshOutliner();
   }
 
@@ -531,15 +543,9 @@ async function boot() {
     }
   });
 
-  // ── sidecar: remember each file's un-baked transform (localStorage) ──
-  const sidecarKey = (o: GsObject) => `gseditor-frame:${o.source.name}:${o.source.file?.size ?? "url"}`;
-  let sidecarTimer = 0;
-  const scheduleSidecarSave = (o: GsObject) => { window.clearTimeout(sidecarTimer); sidecarTimer = window.setTimeout(() => { try { localStorage.setItem(sidecarKey(o), JSON.stringify(o.frame.toJSON())); } catch { /* ignore */ } }, 500); };
-  const restoreSidecar = (o: GsObject) => {
-    let state: any = null;
-    try { const s = localStorage.getItem(sidecarKey(o)); if (s) state = JSON.parse(s); } catch { /* ignore */ }
-    if (state && o.frame.fromJSON(state) && !o.frame.isIdentity()) editor.setMessage(`Restored the previous transform of ${o.name} (Reset undoes it)`, 6000);
-  };
+  // Nothing is remembered between sessions: a reload or a new file always starts from the
+  // file as it is. (Older builds restored the last transform per file; drop those entries.)
+  try { for (const k of Object.keys(localStorage)) if (k.startsWith("gseditor-frame:")) localStorage.removeItem(k); } catch { /* ignore */ }
 
   // ── export: all shown objects into one file, saved where the user picks ──
   const FILE_FLIP_INV = new THREE.Matrix4().makeRotationFromQuaternion(SplatScene.FILE_FLIP.clone().invert());
@@ -559,7 +565,7 @@ async function boot() {
     editor.setLoading(true);
     const log = (t: string) => editor.setMessage(t, 0);
     try {
-      const parts = list.map((o) => { o.mesh.updateMatrixWorld(true); return { o, part: { rows: o.edit.visibleIndices(), matrix: FILE_FLIP_INV.clone().multiply(o.mesh.matrixWorld) } as BakePart }; });
+      const parts = list.map((o) => { o.mesh.updateMatrixWorld(true); return { o, part: { rows: o.edit.exportIndices(), matrix: FILE_FLIP_INV.clone().multiply(o.mesh.matrixWorld) } as BakePart }; });
       let blob: Blob;
       try {
         const sources: FileSource[] = [];
@@ -589,7 +595,7 @@ async function boot() {
   }
   function frameAll() { const b = splat.getBoundsWorld(); if (b) nav.frameBox(b); }
   function wireFrame(o: GsObject) {
-    o.frame.setOnChange(() => { if (activeObj() === o) { panel.setState(o.frame.state); syncProxy(); } scheduleSidecarSave(o); scheduleDims(); scheduleClip(); });
+    o.frame.setOnChange(() => { if (activeObj() === o) { panel.setState(o.frame.state); syncProxy(); } scheduleDims(); scheduleClip(); });
   }
   async function addObject(url: string, name: string, file?: File) {
     editor.setLoading(true);
@@ -600,7 +606,6 @@ async function boot() {
       const o: GsObject = { id: nextId++, name, source: { url, file, name }, mesh, frame, edit, visible: true };
       objects.push(o);
       wireFrame(o);
-      restoreSidecar(o);
       if (objects.length === 1) { frameStart(); setOrtho(false); scene.setViewMode("persp"); }
       setActive({ kind: "object", obj: o });
       setTool("select");

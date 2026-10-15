@@ -11,7 +11,6 @@ export interface EditorCallbacks {
   onExport: (fmt: string) => void;
   onTheme: (t: "dark" | "light") => void;
   onContext: (a: CtxAction) => void;
-  onDimsVisible: (on: boolean) => void;
   onObject: (a: ObjectAction, id: number) => void;
   onAddVolume: (kind: VolumeKind) => void;
 }
@@ -51,7 +50,7 @@ export class Editor {
   private rect: HTMLElement; private circle: HTMLElement; private lassoSvg: HTMLElement; private lasso: SVGPathElement;
   private ctx: HTMLElement;
   private numEl: HTMLElement;
-  private dims: { w: HTMLElement; d: HTMLElement; h: HTMLElement; btn: HTMLButtonElement };
+  private dims: { w: HTMLElement; d: HTMLElement; h: HTMLElement };
   private dimLbls: HTMLElement[];
   private info: { name: HTMLElement; format: HTMLElement; size: HTMLElement; splats: HTMLElement; note: HTMLElement; replace: HTMLButtonElement };
   private objList: HTMLElement;
@@ -73,20 +72,25 @@ export class Editor {
         </div>
         <div class="tsep"></div>
         <div class="tgroup">${TOOLS.map((t) => `<button class="tbtn" data-tool="${t.id}" title="${t.label} (${t.key})"><i class="ti ${t.icon}"></i></button>`).join("")}</div>
+        <div class="tsep"></div>
+        <div class="tgroup">
+          <button class="tbtn" id="t-add" title="Add a clip volume"><i class="ti ti-plus"></i><span class="tri"></span></button>
+          <div id="addfly" class="glass hidden">
+            <button class="fbtn" data-add="box"><i class="ti ti-cube"></i> Box Volume</button>
+            <button class="fbtn" data-add="sphere"><i class="ti ti-sphere"></i> Sphere Volume</button>
+          </div>
+        </div>
       </nav>
 
       <aside id="dock" class="glass">
+        <section class="dsec pinned" id="dsec-objects"><h3><i class="ti ti-list-tree"></i>Outliner <span class="dim">click to make active</span></h3><div class="dbody"><div id="obj-list"></div></div></section>
         <section class="dsec" id="dsec-intake"><h3><i class="ti ti-chevron-down"></i>読み込み</h3><div class="dbody" id="dock-intake"></div></section>
-        <section class="dsec" id="dsec-objects"><h3><i class="ti ti-chevron-down"></i>Outliner <span class="dim">click to make active</span></h3><div class="dbody"><div id="obj-list"></div>
-          <div class="vol-add"><button class="sbtn" id="vol-box" title="Add a box clip volume: splats outside it are hidden (not selectable, not exported)"><i class="ti ti-cube"></i> Box volume</button><button class="sbtn" id="vol-sphere" title="Add a sphere clip volume"><i class="ti ti-sphere"></i> Sphere volume</button></div>
-        </div></section>
-        <section class="dsec" id="dsec-volume"><h3><i class="ti ti-chevron-down"></i>Clip Volume <span class="dim">hides what is outside (or inside)</span></h3><div class="dbody" id="dock-volume"></div></section>
+        <section class="dsec" id="dsec-volume"><h3><i class="ti ti-chevron-down"></i>Clip Volume</h3><div class="dbody" id="dock-volume"></div></section>
         <section class="dsec" id="dsec-transform"><h3><i class="ti ti-chevron-down"></i>Transform <span class="dim">Blender axes (Z up)</span></h3><div class="dbody" id="dock-transform"></div></section>
         <section class="dsec" id="dsec-dims">
           <h3><i class="ti ti-chevron-down"></i>Dimensions</h3>
           <div class="dbody">
             <div class="kv"><span>Width X</span><b id="dim-w">—</b><span>Depth Y</span><b id="dim-d">—</b><span>Height Z</span><b id="dim-h">—</b></div>
-            <button class="sbtn wide toggle" id="dims-btn" title="Draw the box and its sizes in the viewport"><i class="ti ti-eye"></i> Show in viewport</button>
             <div class="note">Body of the active object, stray splats excluded</div>
           </div>
         </section>
@@ -131,14 +135,17 @@ export class Editor {
     const q = <T extends HTMLElement>(id: string) => ui.querySelector("#" + id) as T;
     const ov = q("overlay");
     this.mounts = { intake: q("dock-intake"), transform: q("dock-transform"), volume: q("dock-volume"), history: q("dock-history"), overlay: ov };
-    q<HTMLButtonElement>("vol-box").onclick = () => cb.onAddVolume("box");
-    q<HTMLButtonElement>("vol-sphere").onclick = () => cb.onAddVolume("sphere");
+    // "+" on the rail: a flyout with the volume kinds; click one to add it to the outliner
+    const addBtn = q<HTMLButtonElement>("t-add"), addFly = q("addfly");
+    addBtn.onclick = (e) => { e.stopPropagation(); addFly.classList.toggle("hidden"); };
+    addFly.querySelectorAll<HTMLButtonElement>("[data-add]").forEach((b) => (b.onclick = () => { addFly.classList.add("hidden"); cb.onAddVolume(b.dataset.add as VolumeKind); }));
+    document.addEventListener("pointerdown", (e) => { if (!addFly.contains(e.target as Node) && !addBtn.contains(e.target as Node)) addFly.classList.add("hidden"); }, { capture: true });
     this.hint = q("st-hint"); this.msg = q("st-msg"); this.selPill = q("st-sel");
     this.loader = q("loader"); this.rect = q("selrect"); this.circle = q("selcircle");
     this.lassoSvg = q("lasso"); this.lasso = this.lassoSvg.querySelector("path") as SVGPathElement;
     this.ctx = q("ctxmenu"); this.numEl = q("numinput");
     this.fmtSel = q("exp-fmt"); this.replacePick = q("replace-pick");
-    this.dims = { w: q("dim-w"), d: q("dim-d"), h: q("dim-h"), btn: q("dims-btn") };
+    this.dims = { w: q("dim-w"), d: q("dim-d"), h: q("dim-h") };
     this.dimLbls = Array.from(ov.querySelectorAll(".dimlbl")) as HTMLElement[];
     this.info = { name: q("inf-name"), format: q("inf-format"), size: q("inf-size"), splats: q("inf-splats"), note: q("inf-note"), replace: q("inf-replace") };
     this.objList = q("obj-list");
@@ -172,12 +179,11 @@ export class Editor {
     this.flyout.querySelectorAll<HTMLButtonElement>("[data-variant]").forEach((b) => (b.onclick = () => { closeFly(); cb.onSelectVariant(b.dataset.variant as SelectVariant); cb.onTool("select"); }));
     document.addEventListener("pointerdown", (e) => { if (!this.flyout.contains(e.target as Node) && !this.selBtn.contains(e.target as Node)) closeFly(); }, { capture: true });
     // collapsible sections
-    ui.querySelectorAll<HTMLElement>(".dsec h3").forEach((h) => (h.onclick = (e) => { if ((e.target as HTMLElement).closest("label,input,button")) return; h.parentElement!.classList.toggle("closed"); }));
+    ui.querySelectorAll<HTMLElement>(".dsec:not(.pinned) h3").forEach((h) => (h.onclick = (e) => { if ((e.target as HTMLElement).closest("label,input,button")) return; h.parentElement!.classList.toggle("closed"); }));
     // replace / export / dims
     this.info.replace.onclick = () => this.replacePick.click();
     this.replacePick.onchange = () => { const f = this.replacePick.files?.[0]; if (f) cb.onReplaceFile(f); this.replacePick.value = ""; };
     q<HTMLButtonElement>("exp-go").onclick = () => cb.onExport(this.fmtSel.value);
-    this.dims.btn.onclick = () => { const on = !this.dims.btn.classList.contains("on"); this.setDimsOn(on); cb.onDimsVisible(on); };
     // objects
     this.objList.addEventListener("click", (e) => {
       const row = (e.target as HTMLElement).closest(".orow") as HTMLElement | null; if (!row) return;
@@ -223,7 +229,6 @@ export class Editor {
     const f = (v: number) => `${v.toFixed(2)} m`;
     this.dims.w.textContent = d ? f(d.w) : "—"; this.dims.d.textContent = d ? f(d.d) : "—"; this.dims.h.textContent = d ? f(d.h) : "—";
   }
-  setDimsOn(on: boolean) { this.dims.btn.classList.toggle("on", on); (this.dims.btn.querySelector("i") as HTMLElement).className = `ti ${on ? "ti-eye-off" : "ti-eye"}`; this.dims.btn.lastChild!.textContent = on ? " Hide in viewport" : " Show in viewport"; }
   /** Labels on the dimension box in the viewport: screen positions (stage px) or null to hide. */
   setDimLabels(items: ({ x: number; y: number; text: string } | null)[]) {
     this.dimLbls.forEach((el, i) => {
@@ -251,9 +256,9 @@ export class Editor {
       `<div class="orow${r.active ? " on" : ""}${r.visible ? "" : " off"}" data-id="${r.id}" title="${esc(r.name)}"><button class="eye" title="${r.kind === "object" ? "Show / hide" : "Enable / disable"}"><i class="ti ${r.visible ? "ti-eye" : "ti-eye-off"}"></i></button><i class="ti okind ${icon(r.kind)}"></i><span class="oname">${esc(r.name)}</span><span class="ocount">${r.kind === "object" ? (r.splats >= 1e6 ? (r.splats / 1e6).toFixed(1) + "M" : Math.round(r.splats / 1000) + "k") : ""}</span><button class="ox" title="Remove"><i class="ti ti-x"></i></button></div>`).join("")
       : `<div class="note">No objects yet — add files above</div>`;
   }
-  /** Which detail section applies to the active item. */
+  /** Which detail sections apply to the active item (Transform / Dimensions / Info for an object, the volume panel for a volume). */
   setActiveKind(k: "object" | "volume" | null) {
-    (this.ui.querySelector("#dsec-transform") as HTMLElement).classList.toggle("hidden", k !== "object");
+    for (const id of ["dsec-transform", "dsec-dims", "dsec-info"]) (this.ui.querySelector("#" + id) as HTMLElement).classList.toggle("hidden", k !== "object");
     (this.ui.querySelector("#dsec-volume") as HTMLElement).classList.toggle("hidden", k !== "volume");
   }
   get exportFormat() { return this.fmtSel.value; }

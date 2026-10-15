@@ -5,7 +5,7 @@ import { fromBlenderPos, toBlenderPos, type V3 } from "./blenderAxes";
 export type VolumeKind = "box" | "sphere";
 export type VolumeMode = "inside" | "outside";
 
-/** A clip volume (world space, axis-aligned): splats are kept inside it or outside it. */
+/** A clip volume (world space, axis-aligned): the splats inside it, or outside it, stay visible. */
 export interface ClipVolume {
   id: number; name: string; kind: VolumeKind;
   center: THREE.Vector3; size: THREE.Vector3; radius: number;
@@ -17,15 +17,11 @@ export interface VolumePanelCallbacks {
   onChange: (commit: boolean) => void;
 }
 
-/**
- * The dock's "Clip Volume" section: the active volume's name, keep inside / outside,
- * centre and size (Blender axes), bounds visibility. The gizmo tools (G / S) edit the
- * same numbers in the viewport.
- */
+/** The dock's "Clip Volume" section for the active volume. The G / S gizmo edits the same numbers in the viewport. */
 export class VolumePanel {
   readonly el: HTMLElement;
   private vol: ClipVolume | null = null;
-  private name: HTMLInputElement; private mode: HTMLSelectElement; private show: HTMLInputElement; private enabled: HTMLInputElement;
+  private name: HTMLInputElement; private mode: HTMLSelectElement; private show: HTMLInputElement;
   private center: NumField[] = []; private size: NumField[] = []; private radius: NumField;
   private sizeGrp: HTMLElement; private radGrp: HTMLElement;
 
@@ -34,17 +30,16 @@ export class VolumePanel {
     el.className = "vp";
     el.innerHTML = `
       <div class="vp-row"><label>Name</label><input type="text" id="vp-name" spellcheck="false"></div>
-      <div class="vp-row"><label>Keep</label><select id="vp-mode"><option value="inside">Inside — hide everything outside</option><option value="outside">Outside — hide everything inside</option></select></div>
-      <div class="vp-row"><label class="chk"><input type="checkbox" id="vp-enabled"> Enabled</label><label class="chk"><input type="checkbox" id="vp-show"> Show bounds</label></div>
+      <div class="vp-row"><label>Show</label><select id="vp-mode"><option value="inside">Inside</option><option value="outside">Outside</option></select></div>
+      <div class="vp-row"><label></label><label class="chk"><input type="checkbox" id="vp-show"> Show bounds</label></div>
       <div class="tp-grp"><div class="tp-lbl">Center <span class="dim">m</span></div><div class="tp-fields" id="vp-center"></div></div>
       <div class="tp-grp" id="vp-size-grp"><div class="tp-lbl">Size <span class="dim">m</span></div><div class="tp-fields" id="vp-size"></div></div>
       <div class="tp-grp" id="vp-rad-grp"><div class="tp-lbl">Radius <span class="dim">m</span></div><div class="tp-fields" id="vp-radius"></div></div>
-      <div class="note">Clipped splats are hidden, cannot be selected and are left out of the export. Several volumes combine.</div>
     `;
     host.appendChild(el);
     this.el = el;
     const q = <T extends HTMLElement>(id: string) => el.querySelector("#" + id) as T;
-    this.name = q("vp-name"); this.mode = q("vp-mode"); this.show = q("vp-show"); this.enabled = q("vp-enabled");
+    this.name = q("vp-name"); this.mode = q("vp-mode"); this.show = q("vp-show");
     this.sizeGrp = q("vp-size-grp"); this.radGrp = q("vp-rad-grp");
     const axes: ("x" | "y" | "z")[] = ["x", "y", "z"];
     const push = (c: boolean) => this.pushFields(c);
@@ -57,14 +52,13 @@ export class VolumePanel {
     this.name.onchange = () => { if (this.vol) { this.vol.name = this.name.value.trim() || this.vol.name; cb.onChange(true); } };
     this.mode.onchange = () => { if (this.vol) { this.vol.mode = this.mode.value as VolumeMode; cb.onChange(true); } };
     this.show.onchange = () => { if (this.vol) { this.vol.showBounds = this.show.checked; cb.onChange(true); } };
-    this.enabled.onchange = () => { if (this.vol) { this.vol.enabled = this.enabled.checked; cb.onChange(true); } };
   }
 
   private pushFields(commit: boolean) {
     const v = this.vol; if (!v) return;
     const c = fromBlenderPos(this.center.map((f) => f.get()) as V3);
     v.center.set(c[0], c[1], c[2]);
-    if (v.kind === "box") { const s = this.size.map((f) => f.get()); v.size.set(s[0], s[2], s[1]); } // Blender X,Y,Z → three x,z,y (sizes are positive, no sign)
+    if (v.kind === "box") { const s = this.size.map((f) => f.get()); v.size.set(s[0], s[2], s[1]); } // Blender X,Y,Z → three x,z,y (sizes are positive)
     else v.radius = this.radius.get();
     this.cb.onChange(commit);
   }
@@ -75,7 +69,7 @@ export class VolumePanel {
     this.el.classList.toggle("hidden", !v);
     if (!v) return;
     if (document.activeElement !== this.name) this.name.value = v.name;
-    this.mode.value = v.mode; this.show.checked = v.showBounds; this.enabled.checked = v.enabled;
+    this.mode.value = v.mode; this.show.checked = v.showBounds;
     const c = toBlenderPos([v.center.x, v.center.y, v.center.z]);
     this.center.forEach((f, i) => f.set(c[i]));
     this.sizeGrp.classList.toggle("hidden", v.kind !== "box"); this.radGrp.classList.toggle("hidden", v.kind !== "sphere");
