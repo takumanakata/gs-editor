@@ -14,8 +14,8 @@ export class IntakePanel {
   ) {
     container.innerHTML = `
       <div class="drop" id="in-drop">
-        <i class="ti ti-upload"></i>ここにドラッグ&ドロップ
-        <br><small>GS ファイル（.ply / .spz / .splat / .ksplat）・クリックで選択</small>
+        <i class="ti ti-upload"></i>GS ファイルをここにドロップ
+        <small>.ply / .spz / .splat / .ksplat・クリックで選択</small>
       </div>
       <input id="in-file" type="file" accept=".ply,.spz,.splat,.ksplat,.sog" class="hidden">
     `;

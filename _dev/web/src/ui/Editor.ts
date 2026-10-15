@@ -90,8 +90,7 @@ export class Editor {
         <section class="dsec grow" id="dsec-history"><h3><i class="ti ti-history"></i> 編集履歴 <span class="dim">クリックで戻る</span></h3><div id="dock-history"></div></section>
         <section class="dsec" id="dsec-export">
           <div class="exp-row"><select id="exp-fmt"><option value="spz">.spz（小さい）</option><option value="ply">.ply（汎用）</option><option value="splat">.splat（基本色のみ）</option></select></div>
-          <button class="cta big" id="exp-go"><i class="ti ti-download"></i> 書き出し</button>
-          <div class="dim-note">消した粒と、原点・向き・大きさの修正を焼き込んだファイルを保存します</div>
+          <button class="cta big" id="exp-go" title="消した粒と、原点・向き・大きさの修正を焼き込んだファイルを保存します"><i class="ti ti-download"></i> 書き出し</button>
         </section>
       </aside>
 

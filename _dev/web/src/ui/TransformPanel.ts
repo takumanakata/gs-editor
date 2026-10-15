@@ -25,8 +25,8 @@ export class TransformPanel {
     el.innerHTML = `
       <div class="tp-grp"><div class="tp-lbl">位置 <span class="dim">m</span></div><div class="tp-fields" id="tp-pos"></div></div>
       <div class="tp-grp"><div class="tp-lbl">回転 <span class="dim">°・原点を中心に</span></div><div class="tp-fields" id="tp-rot"></div></div>
-      <div class="tp-grp"><div class="tp-lbl">大きさ <span class="dim">倍率</span></div><div class="tp-fields" id="tp-scale"></div></div>
-      <div class="tp-foot"><span class="dim">ドラッグで変更・クリックで入力・Ctrl で刻み・Shift で微調整</span><button class="sbtn" id="tp-reset" title="原点・向き・大きさを読み込んだ状態に戻す"><i class="ti ti-refresh"></i> リセット</button></div>
+      <div class="tp-grp"><div class="tp-lbl">大きさ <span class="dim">倍率</span></div><div class="tp-fields one" id="tp-scale"></div></div>
+      <div class="tp-foot"><span class="dim">ドラッグで変更 / クリックで入力</span><button class="sbtn" id="tp-reset" title="原点・向き・大きさを読み込んだ状態に戻す"><i class="ti ti-refresh"></i> リセット</button></div>
     `;
     host.appendChild(el);
     this.el = el;
