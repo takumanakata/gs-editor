@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "gseditor-viewer",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "_dev/web", "run", "dev", "--", "--port", "5199", "--strictPort", "--no-open"],
+      "port": 5199
+    }
+  ]
+}

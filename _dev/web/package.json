@@ -1,0 +1,26 @@
+{
+  "name": "gseditor-web",
+  "private": true,
+  "version": "0.3.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@playcanvas/splat-transform": "^2.6.0",
+    "@sparkjsdev/spark": "^2.1.0",
+    "@tabler/icons-webfont": "^3.44.0",
+    "playcanvas": "^2.19.7",
+    "three": "^0.180.0"
+  },
+  "devDependencies": {
+    "@types/three": "^0.180.0",
+    "typescript": "^5.4.0",
+    "vite": "^5.2.0",
+    "vitest": "^4.1.9"
+  }
+}

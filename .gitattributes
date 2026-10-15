@@ -1,0 +1,15 @@
+# Line endings must survive a checkout on the other OS:
+#  - .bat needs CRLF or cmd.exe mis-parses it (silently closes the window)
+#  - .command / .sh need LF or bash reports "\r: command not found"
+* text=auto
+*.bat text eol=crlf
+*.command text eol=lf
+*.sh text eol=lf
+
+# GS assets are binary (they live outside git today, but never let them be munged)
+*.ply binary
+*.spz binary
+*.splat binary
+*.ksplat binary
+*.sog binary
+*.pt binary
