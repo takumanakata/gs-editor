@@ -18,7 +18,8 @@ export class SplatEditor {
   private centers!: Float32Array;  // 3n — cached splat positions (local / file space)
   private origScale!: Float32Array; // 3n — original scales (to restore on show/undo)
   private origColor!: Float32Array; // 3n — original colours (to untint on deselect)
-  private hiddenFlag!: Uint8Array; // n — 1 if currently hidden
+  private hiddenFlag!: Uint8Array; // n — 1 if deleted (hidden by the user)
+  private clipFlag!: Uint8Array;   // n — 1 if hidden by a clip volume (not selectable, not exported)
   private selFlag!: Uint8Array;    // n — 1 if selected
   private selCount = 0;
   private _ready = false;
@@ -30,14 +31,45 @@ export class SplatEditor {
   get count() { return this.n; }
   get selectedCount() { return this.selCount; }
   isHidden(i: number) { return !!this.hiddenFlag?.[i]; }
+  /** Shown = not deleted and not clipped. */
+  private shown(i: number) { return !this.hiddenFlag[i] && !this.clipFlag[i]; }
+  get clippedCount() { let c = 0; for (let i = 0; i < this.n; i++) c += this.clipFlag[i]; return c; }
 
-  /** Row indices (source order) of the splats still visible — what the export keeps. */
+  /** Row indices (source order) of the splats shown — what the export keeps (clipped ones are left out too). */
   visibleIndices(): Uint32Array {
     if (!this._ready) return new Uint32Array(0);
-    let m = 0; for (let i = 0; i < this.n; i++) if (!this.hiddenFlag[i]) m++;
+    let m = 0; for (let i = 0; i < this.n; i++) if (this.shown(i)) m++;
     const out = new Uint32Array(m); let k = 0;
-    for (let i = 0; i < this.n; i++) if (!this.hiddenFlag[i]) out[k++] = i;
+    for (let i = 0; i < this.n; i++) if (this.shown(i)) out[k++] = i;
     return out;
+  }
+
+  /**
+   * Re-evaluate the clip volumes: `pass(x, y, z)` gets WORLD positions and says whether a
+   * splat stays visible. Clipped splats are drawn at zero scale, lose their selection
+   * and cannot be selected; the deleted flag is untouched. Returns true if anything changed.
+   */
+  applyClip(worldMatrix: THREE.Matrix4, pass: ((x: number, y: number, z: number) => boolean) | null): boolean {
+    if (!this._ready) return false;
+    const e = worldMatrix.elements, sc = new THREE.Vector3();
+    let changed = false;
+    for (let i = 0; i < this.n; i++) {
+      const j = i * 3, x = this.centers[j], y = this.centers[j + 1], z = this.centers[j + 2];
+      let clip = 0;
+      if (pass) {
+        const wx = e[0] * x + e[4] * y + e[8] * z + e[12], wy = e[1] * x + e[5] * y + e[9] * z + e[13], wz = e[2] * x + e[6] * y + e[10] * z + e[14];
+        clip = pass(wx, wy, wz) ? 0 : 1;
+      }
+      if (clip === this.clipFlag[i]) continue;
+      this.clipFlag[i] = clip; changed = true;
+      if (this.hiddenFlag[i]) continue;                 // deleted stays at zero either way
+      if (clip && this.selFlag[i]) this.setSel(i, false);
+      const s = this.ps.getSplat(i);
+      if (clip) this.ps.setSplat(i, s.center, ZERO, s.quaternion, s.opacity, s.color);
+      else { sc.set(this.origScale[j], this.origScale[j + 1], this.origScale[j + 2]); this.ps.setSplat(i, s.center, sc, s.quaternion, s.opacity, s.color); }
+    }
+    if (changed) this.ps.needsUpdate = true;
+    return changed;
   }
 
   /** Up to `maxN` visible splat centres transformed by `m` (flat xyz) — for dimensions. */
@@ -85,7 +117,7 @@ export class SplatEditor {
     let bestT = Infinity, bi = -1;
     const c = this.centers;
     for (let i = 0; i < this.n; i += step) {
-      if (this.hiddenFlag[i]) continue;
+      if (!this.shown(i)) continue;
       const j = i * 3;
       const vx = c[j] - o.x, vy = c[j + 1] - o.y, vz = c[j + 2] - o.z;
       const t = vx * d.x + vy * d.y + vz * d.z;
@@ -118,6 +150,7 @@ export class SplatEditor {
     this.origScale = new Float32Array(this.n * 3);
     this.origColor = new Float32Array(this.n * 3);
     this.hiddenFlag = new Uint8Array(this.n);
+    this.clipFlag = new Uint8Array(this.n);
     this.selFlag = new Uint8Array(this.n);
     this.sx = new Float32Array(this.n); this.sy = new Float32Array(this.n); this.svis = new Uint8Array(this.n);
     let k = 0;
@@ -139,7 +172,7 @@ export class SplatEditor {
     const v = new THREE.Vector3();
     for (let i = 0; i < this.n; i++) {
       this.svis[i] = 0;
-      if (this.hiddenFlag[i]) continue;
+      if (!this.shown(i)) continue;
       const j = i * 3;
       v.set(this.centers[j], this.centers[j + 1], this.centers[j + 2]);
       if (worldMatrix) v.applyMatrix4(worldMatrix);
@@ -198,9 +231,9 @@ export class SplatEditor {
     };
     return this.applyTest(inside, mode);
   }
-  selectAll() { if (!this._ready) return; for (let i = 0; i < this.n; i++) if (!this.hiddenFlag[i]) this.setSel(i, true); this.ps.needsUpdate = true; }
+  selectAll() { if (!this._ready) return; for (let i = 0; i < this.n; i++) if (this.shown(i)) this.setSel(i, true); this.ps.needsUpdate = true; }
   deselectAll() { if (!this._ready || !this.selCount) return; for (let i = 0; i < this.n; i++) this.setSel(i, false); this.ps.needsUpdate = true; }
-  invertSelection() { if (!this._ready) return; for (let i = 0; i < this.n; i++) if (!this.hiddenFlag[i]) this.setSel(i, !this.selFlag[i]); this.ps.needsUpdate = true; }
+  invertSelection() { if (!this._ready) return; for (let i = 0; i < this.n; i++) if (this.shown(i)) this.setSel(i, !this.selFlag[i]); this.ps.needsUpdate = true; }
   selectedIndices(): number[] { const out: number[] = []; if (!this._ready) return out; for (let i = 0; i < this.n; i++) if (this.selFlag[i]) out.push(i); return out; }
 
   // ── hide / show (delete is "hide the selection") ───────────────────────
@@ -228,10 +261,11 @@ export class SplatEditor {
     for (const i of indices) {
       if (!this.hiddenFlag[i]) continue;
       const j = i * 3;
+      this.hiddenFlag[i] = 0; any = true;
+      if (this.clipFlag[i]) continue;                   // still clipped: stays at zero scale
       sc.set(this.origScale[j], this.origScale[j + 1], this.origScale[j + 2]);
       const s = this.ps.getSplat(i);
       this.ps.setSplat(i, s.center, sc, s.quaternion, s.opacity, s.color);
-      this.hiddenFlag[i] = 0; any = true;
     }
     if (any) this.ps.needsUpdate = true;
   }

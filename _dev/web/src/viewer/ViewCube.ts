@@ -36,7 +36,7 @@ export class ViewCube {
       if (e.button !== 0) return;
       const f = (e.target as HTMLElement).closest(".vc-face") as HTMLElement | null; // before capture retargets events
       down = { x: e.clientX, y: e.clientY, dragging: false, face: (f?.dataset.v as ViewName) || null };
-      el.setPointerCapture(e.pointerId);
+      try { el.setPointerCapture(e.pointerId); } catch { /* synthetic pointer */ }
       e.preventDefault();
     });
     el.addEventListener("pointermove", (e) => {

@@ -15,9 +15,9 @@ export class IntakePanel {
       <div class="drop" id="in-drop">
         <i class="ti ti-upload"></i>
         <div>GS ファイルをここにドロップ</div>
-        <small>.ply / .spz / .splat / .ksplat</small>
+        <small>.ply / .spz / .splat / .ksplat・複数可（別オブジェクトとして並びます）</small>
       </div>
-      <input id="in-file" type="file" accept=".ply,.spz,.splat,.ksplat,.sog" class="hidden">
+      <input id="in-file" type="file" multiple accept=".ply,.spz,.splat,.ksplat,.sog" class="hidden">
     `;
     const drop = container.querySelector("#in-drop") as HTMLDivElement;
     const file = container.querySelector("#in-file") as HTMLInputElement;
@@ -33,10 +33,10 @@ export class IntakePanel {
     });
   }
 
-  /** Public so a viewer-wide drop can route here too. */
+  /** Public so a viewer-wide drop can route here too. Every GS file becomes an object. */
   handleFiles(files: File[]) {
-    const f = files.find((x) => GS_EXT.test(x.name));
-    if (!f) { this.logSink("Unsupported file (GS files only: .ply / .spz / .splat / .ksplat)"); return; }
-    this.onResult(URL.createObjectURL(f), f); // the File is kept by the host for the full-quality export
+    const gs = files.filter((x) => GS_EXT.test(x.name));
+    if (!gs.length) { this.logSink("Unsupported file (GS files only: .ply / .spz / .splat / .ksplat)"); return; }
+    for (const f of gs) this.onResult(URL.createObjectURL(f), f); // the File is kept by the host for the full-quality export
   }
 }

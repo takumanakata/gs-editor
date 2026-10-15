@@ -22,6 +22,8 @@ export class NumField {
   private editing = false;
   private dragging = false;
   readonly label: string;
+  /** Set by the panel: Tab (back = Shift+Tab) moves editing to another field. */
+  onTab: ((back: boolean) => void) | null = null;
 
   constructor(host: HTMLElement, private opts: NumFieldOpts, private onChange: (v: number, commit: boolean) => void) {
     this.label = opts.label;
@@ -65,6 +67,7 @@ export class NumField {
       e.stopPropagation(); // the viewport's shortcuts must not fire while typing
       if (e.key === "Enter") { this.commitEdit(); }
       else if (e.key === "Escape") { this.cancelEdit(); }
+      else if (e.key === "Tab") { e.preventDefault(); const back = e.shiftKey; this.commitEdit(); this.onTab?.(back); }
     });
     this.input.addEventListener("keyup", (e) => e.stopPropagation());
     this.input.addEventListener("blur", () => { if (this.editing) this.commitEdit(); });

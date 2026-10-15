@@ -6,13 +6,14 @@ export interface TransformPanelCallbacks {
   /** The whole state in three.js terms (already converted from the Blender numbers shown). commit=false while dragging / typing. */
   onState: (s: FrameState, commit: boolean) => void;
   onClear: (what: "location" | "rotation" | "scale") => void;
+  onApply: () => void;
   onReset: () => void;
 }
 
 /**
  * Blender's Transform panel: Location / Rotation / Scale as stacked X / Y / Z
- * drag-or-type fields, in Blender's Z-up numbers. Location is where the object
- * origin sits; rotation and scale are about that origin.
+ * drag-or-type fields in Blender's Z-up numbers. Tab walks the fields. "Apply
+ * Transform" makes the current placement the new zero.
  */
 export class TransformPanel {
   readonly el: HTMLElement;
@@ -28,7 +29,11 @@ export class TransformPanel {
       <div class="tp-grp"><div class="tp-lbl">Location <span class="dim">m</span><button class="tp-clear" data-clear="location" title="Clear location: put the object origin on the world origin (Alt+G)">Alt+G</button></div><div class="tp-fields" id="tp-pos"></div></div>
       <div class="tp-grp"><div class="tp-lbl">Rotation <span class="dim">°, about the object origin</span><button class="tp-clear" data-clear="rotation" title="Clear rotation (Alt+R)">Alt+R</button></div><div class="tp-fields" id="tp-rot"></div></div>
       <div class="tp-grp"><div class="tp-lbl">Scale <span class="dim">uniform</span><button class="tp-clear" data-clear="scale" title="Clear scale (Alt+S)">Alt+S</button></div><div class="tp-fields" id="tp-scale"></div></div>
-      <div class="tp-foot"><span class="dim">Drag to change, click to type. Ctrl snaps, Shift is fine.</span><button class="sbtn" id="tp-reset" title="Back to the file as loaded (origin included)"><i class="ti ti-refresh"></i> Reset</button></div>
+      <div class="tp-foot">
+        <button class="sbtn" id="tp-apply" title="Make the current location, rotation and scale the new zero. The baked result is unchanged; later edits are relative to here (Ctrl+A)"><i class="ti ti-check"></i> Apply Transform</button>
+        <button class="sbtn" id="tp-reset" title="Back to the file as loaded, origin included"><i class="ti ti-refresh"></i> Reset Transform to Default</button>
+      </div>
+      <div class="note">Drag to change, click to type, Tab to the next field. Ctrl snaps, Shift is fine.</div>
     `;
     host.appendChild(el);
     this.el = el;
@@ -41,7 +46,11 @@ export class TransformPanel {
     this.pos = axes.map((a) => new NumField(posHost, { label: a.toUpperCase(), unit: "m", precision: 3, dragStep: 0.01, snap: 0.1, color: a }, (_v, c) => emit(c)));
     this.rot = axes.map((a) => new NumField(rotHost, { label: a.toUpperCase(), unit: "°", precision: 1, dragStep: 0.5, snap: 5, color: a }, (_v, c) => emit(c)));
     this.scale = new NumField(scHost, { label: "×", precision: 4, dragStep: 0.005, snap: 0.5, min: 0.0001 }, (_v, c) => emit(c));
+    // Tab / Shift+Tab walk Location X → Y → Z → Rotation X … → Scale
+    const order = [...this.pos, ...this.rot, this.scale];
+    order.forEach((f, i) => (f.onTab = (back) => order[(i + (back ? order.length - 1 : 1)) % order.length].beginEdit()));
     (el.querySelector("#tp-reset") as HTMLButtonElement).onclick = () => cb.onReset();
+    (el.querySelector("#tp-apply") as HTMLButtonElement).onclick = () => cb.onApply();
     el.querySelectorAll<HTMLButtonElement>(".tp-clear").forEach((b) => (b.onclick = () => cb.onClear(b.dataset.clear as any)));
   }
 

@@ -176,6 +176,27 @@ export async function bakeFile(data: Uint8Array, filename: string, parts: BakePa
   return new Blob([await writeTable(st, baked, fmt, outName) as BlobPart], { type: MIME });
 }
 
+/** One source file per object, each with its own baked transform; all combined into one output. */
+export interface FileSource { data: Uint8Array; filename: string; parts: BakePart[]; refs: RefPoint[] }
+export async function bakeFiles(sources: FileSource[], fmt: GsFormat, outName: string, log: (s: string) => void = () => {}): Promise<Blob> {
+  const { st, pc } = await loadLibs();
+  const baked: InstanceType<ST["DataTable"]>[] = [];
+  for (const src of sources) {
+    const rfs = new st.MemoryReadFileSystem();
+    rfs.set(src.filename, src.data);
+    const tables = await st.readFile({ filename: src.filename, inputFormat: st.getInputFormat(src.filename), options: READ_OPTIONS, params: [], fileSystem: rfs });
+    let table = tables.length === 1 ? tables[0] : st.combine(tables);
+    table = st.convertToSpace(table, st.Transform.PLY, true);
+    const X = table.getColumnByName("x")?.data, Y = table.getColumnByName("y")?.data, Z = table.getColumnByName("z")?.data;
+    if (!X || !Y || !Z) throw new Error("位置列がありません");
+    const Bin = detectBasis((i) => (i < table.numRows ? [X[i], Y[i], Z[i]] : null), src.refs);
+    baked.push(await applyParts(st, pc, table, src.parts, Bin, sparkBasis(fmt), log));
+  }
+  if (!baked.length) throw new Error("書き出す splat がありません");
+  const table = baked.length === 1 ? baked[0] : st.combine(baked);
+  return new Blob([await writeTable(st, table, fmt, outName) as BlobPart], { type: MIME });
+}
+
 export interface SplatSource {
   /** Spark PackedSplats-like: getNumSplats(), getSplat(i) → {center, scales, quaternion, opacity, color}. */
   packed: any;

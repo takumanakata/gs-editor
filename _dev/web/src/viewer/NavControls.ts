@@ -104,14 +104,24 @@ export class NavControls {
     this.orbit.target.copy(target);
   }
 
-  /** Smoothly fly to a point: gentle dolly-in + slerp orientation. */
+  /** Double-click: fly to the point, to 30% of the distance, never farther (same rule as the Layouter). */
   focusOn(point: THREE.Vector3) {
     let dir = new THREE.Vector3().subVectors(this.camera.position, point);
     let dist = dir.length();
     if (dist < 1e-3) { dir = new THREE.Vector3(0, 0, 1).applyQuaternion(this.camera.quaternion); dist = 1; }
     dir.normalize();
-    const newDist = Math.max(this.sceneSize * 0.05, dist * 0.8);
-    this.flyTo(point.clone().add(dir.multiplyScalar(newDist)), point, 0.6);
+    const near = Math.max(this.sceneSize * 0.01, 0.05);
+    const newDist = Math.min(dist, Math.max(near, dist * 0.3));
+    this.flyTo(point.clone().add(dir.multiplyScalar(newDist)), point, 0.7);
+  }
+
+  /** Orbit by a pixel delta (the view cube is dragged): the same spherical turn a middle-drag makes. */
+  rotateBy(dx: number, dy: number) {
+    this.touch(); this.tween = undefined; this.onRotateStart?.();
+    const o = this.orbit as any, h = this.dom.clientHeight || 1;
+    o._rotateLeft?.((2 * Math.PI * dx) / h * this.orbit.rotateSpeed);
+    o._rotateUp?.((2 * Math.PI * dy) / h * this.orbit.rotateSpeed);
+    this.orbit.update();
   }
 
   /** Axis view: camera on the view's axis at the current distance, looking at the pivot. */
@@ -153,15 +163,6 @@ export class NavControls {
     this.sceneSize *= k; this.swayAmp *= k;
     this.tween = undefined;
     this.orbit.update();
-  }
-
-  /** Drive an orbit rotation from outside (the view cube is dragged): synthetic middle-drag. */
-  syntheticDrag(phase: "down" | "move" | "up", x: number, y: number) {
-    const init: PointerEventInit = { bubbles: true, cancelable: true, pointerId: 999, pointerType: "mouse", isPrimary: true, clientX: x, clientY: y, button: phase === "move" ? -1 : 1, buttons: phase === "up" ? 0 : 4 };
-    const type = phase === "down" ? "pointerdown" : phase === "move" ? "pointermove" : "pointerup";
-    if (phase === "down") { this.orbit.mouseButtons.MIDDLE = THREE.MOUSE.ROTATE; this.onRotateStart?.(); }
-    // a synthetic drag from the view cube must not be read as "Shift held" — the init has no modifiers
-    this.dom.dispatchEvent(new PointerEvent(type, init));
   }
 
   update(dt: number) {
