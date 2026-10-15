@@ -1,218 +1,218 @@
-import { IntakePanel } from "./IntakePanel";
+export type Tool = "box" | "circle" | "lasso" | "move" | "rotate" | "scale" | "measure";
+export type CtxAction = "delete" | "deselect" | "selectAll" | "focus";
 
 export interface EditorCallbacks {
-  onMode: (m: "orbit" | "fly") => void;
-  onRecenter: () => void;
-  onTheme: (t: "dark" | "light") => void;
-  onExportGS: (fmt: string) => void;
-  onLoadResult: (url: string, file: File) => void;
-  onBusy: (busy: boolean) => void;
-  onEditMode: (mode: "clean" | "none") => void;
-  onUndo: () => void;
-  onRedo: () => void;
+  onTool: (t: Tool) => void;
+  onOpenFile: (f: File) => void;
+  onExport: (fmt: string) => void;
   onRestoreAll: () => void;
-  onRemoveNoise: (strength: number) => void;
-  onAutoClean: () => void;
-  onBrushSize: (px: number) => void;
-  onTogglePanel: (which: "frame") => void;
+  onTheme: (t: "dark" | "light") => void;
+  onContext: (a: CtxAction) => void;
+  onFrameAll: () => void;
+  onDimsVisible: (on: boolean) => void;
+  onMeasureApply: (realMeters: number) => void;
 }
 
+const TOOLS: { id: Tool; icon: string; label: string; key: string }[] = [
+  { id: "box", icon: "ti-square-dashed", label: "範囲選択（箱）", key: "B" },
+  { id: "circle", icon: "ti-circle-dashed", label: "範囲選択（丸・なぞる）", key: "C" },
+  { id: "lasso", icon: "ti-lasso", label: "範囲選択（投げ縄）", key: "L" },
+  { id: "move", icon: "ti-arrows-move", label: "移動（シーン全体）", key: "G" },
+  { id: "rotate", icon: "ti-rotate-360", label: "回転（シーン全体・原点を中心に）", key: "R" },
+  { id: "scale", icon: "ti-arrows-maximize", label: "スケール（シーン全体・原点を中心に）", key: "S" },
+  { id: "measure", icon: "ti-ruler-measure", label: "メジャー（2点間の距離）", key: "M" },
+];
+
+/**
+ * The shell, laid out like Blender: a header with the File menu, a tool column on the
+ * left, the viewport in the middle, a fixed dock on the right (import / transform /
+ * dimensions / history / export) and a status bar with the hints for the current tool.
+ */
 export class Editor {
-  private scenePill!: HTMLElement;
-  private navBtns: HTMLButtonElement[] = [];
-  private intake!: IntakePanel;
-  /** Switch the paint mode from outside (e.g. when a pick mode starts). */
-  setEditUI: (mode: "clean" | "none") => void = () => {};
-  private console!: HTMLElement;
-  private conText!: HTMLElement;
-  private conBar!: HTMLElement;
-  private thumb!: HTMLElement;
-  private thumbImg!: HTMLImageElement;
-  private prevThumbUrl: string | null = null;
-  private loader!: HTMLElement;
-  private lastPill = "";
-  /** Host element for extra panels (scene-transform / history panels mount here). */
   readonly ui: HTMLElement;
+  readonly stage: HTMLElement;
+  readonly mounts: { intake: HTMLElement; transform: HTMLElement; history: HTMLElement; overlay: HTMLElement };
+  private toolBtns = new Map<Tool, HTMLButtonElement>();
+  private hint: HTMLElement; private msg: HTMLElement; private pill: HTMLElement; private selPill: HTMLElement;
+  private msgTimer = 0;
+  private loader: HTMLElement;
+  private rect: HTMLElement; private circle: HTMLElement; private lassoSvg: HTMLElement; private lasso: SVGPathElement;
+  private ctx: HTMLElement;
+  private numEl: HTMLElement;
+  private dims: { w: HTMLElement; d: HTMLElement; h: HTMLElement; chk: HTMLInputElement; measured: HTMLElement; real: HTMLInputElement; box: HTMLElement };
+  private fmtSel: HTMLSelectElement;
+  private orthoTag: HTMLElement;
+  private lastPill = "";
+  private filePick: HTMLInputElement;
 
-  constructor(private cb: EditorCallbacks, view: HTMLElement, ui: HTMLElement) {
-    this.ui = ui;
+  constructor(cb: EditorCallbacks, stage: HTMLElement, ui: HTMLElement) {
+    this.ui = ui; this.stage = stage;
     ui.innerHTML = `
-      <div id="rail" class="glass">
-        <button class="ico" id="r-clean" title="消しゴム（ペンで塗って削除）"><i class="ti ti-eraser"></i></button>
-        <div class="rail-sep"></div>
-        <button class="ico" id="r-frame" title="原点と向き（シーン全体の原点・水平・大きさを直す）"><i class="ti ti-axis-x"></i></button>
-      </div>
-
-      <div id="cleanbar" class="glass">
-        <button class="cb-btn" id="cb-autoclean"><i class="ti ti-wand"></i> おまかせクリーンアップ</button>
-        <span class="cb-sep"></span>
-        <span class="cb-hint"><i class="ti ti-eraser"></i> ペンで塗って削除</span>
-        <label class="cb-lbl">太さ</label><input id="cb-brush" type="range" min="8" max="140" step="2" value="28" title="ペンの太さ">
-        <span class="cb-sep"></span>
-        <button class="cb-btn" id="cb-noise"><i class="ti ti-sparkles"></i> 浮遊ノイズ除去</button>
-        <input id="cb-noise-str" type="range" min="5" max="600" step="5" value="40" title="除去強度（大きいほど強く消す）">
-        <span class="cb-sep"></span>
-        <button class="ico" id="cb-undo" title="元に戻す (Ctrl+Z)"><i class="ti ti-arrow-back-up"></i></button>
-        <button class="ico" id="cb-redo" title="やり直す (Ctrl+Shift+Z)"><i class="ti ti-arrow-forward-up"></i></button>
-        <button class="ico" id="cb-all" title="消したものを全部表示に戻す"><i class="ti ti-refresh"></i></button>
-      </div>
-
-      <div id="topbar" class="glass">
-        <span id="scenePill" style="color:var(--tx-dim);font-size:12px;">no scene</span>
-        <span class="ld" id="topLoad"><i class="ti ti-folder-open"></i> GS を読み込む…</span>
-      </div>
-
-      <div id="navmode" class="glass">
-        <button class="ico on" data-nav="orbit" title="周回 (左ドラッグ=周回 / 右ドラッグ=移動 / ホイール=ズーム / ダブルクリックで寄る)"><i class="ti ti-pointer"></i></button>
-        <button class="ico" data-nav="fly" title="ドローン移動 (WASDで自動切替 / マウスで視点 / ホイールで速度 / Escで解除)"><i class="ti ti-drone"></i></button>
-        <button class="ico" id="c-recenter" title="ビューを戻す"><i class="ti ti-focus-2"></i></button>
-      </div>
-
-      <div id="themeToggle" class="glass"><button class="ico" id="themeBtn" title="ライト / ダーク 切替" aria-label="テーマ切替"><i class="ti ti-moon ic-moon"></i><i class="ti ti-sun ic-sun"></i></button></div>
-
-      <div id="actionbar" class="glass">
-        <button class="cta" id="a-export"><i class="ti ti-download"></i> 書き出し</button>
-      </div>
-      <div id="exportmenu" class="glass">
-        <div class="exp-head">GSを書き出し</div>
-        <div class="exp-gs">
-          <span class="exp-note">掃除と、原点・向き・大きさの修正をすべて反映したファイルを保存します</span>
-          <div class="exp-gs-row">
-            <select id="exp-fmt"><option value="ply">.ply</option><option value="spz">.spz</option><option value="splat">.splat</option></select>
-            <button class="exp-go" id="x-gs">保存</button>
+      <header id="hdr">
+        <div class="menu" id="filemenu">
+          <button class="mbtn" id="file-btn">ファイル</button>
+          <div class="mlist" id="file-list">
+            <button data-act="open"><i class="ti ti-folder-open"></i>開く…<kbd>Ctrl+O</kbd></button>
+            <hr>
+            <button data-act="export-spz"><i class="ti ti-download"></i>書き出し .spz<kbd>小さい</kbd></button>
+            <button data-act="export-ply"><i class="ti ti-download"></i>書き出し .ply<kbd>汎用</kbd></button>
+            <button data-act="export-splat"><i class="ti ti-download"></i>書き出し .splat<kbd>基本色のみ</kbd></button>
+            <hr>
+            <button data-act="restore-all"><i class="ti ti-refresh"></i>消したものを全部戻す</button>
+            <button data-act="frame-all"><i class="ti ti-focus-2"></i>全体を表示<kbd>Home</kbd></button>
           </div>
         </div>
-      </div>
+        <span class="hdr-title">GSEditor</span>
+        <span class="hdr-sp"></span>
+        <span id="orthotag" class="hdr-tag">透視</span>
+        <button class="ico" id="themeBtn" title="ライト / ダーク"><i class="ti ti-moon ic-moon"></i><i class="ti ti-sun ic-sun"></i></button>
+      </header>
 
-      <div id="crosshair"></div>
-      <div id="lockhint"><i class="ti ti-mouse"></i> 視点ロック中 — <b>Esc</b>で解除 / ホイールで速度</div>
+      <nav id="tools">
+        ${TOOLS.map((t, i) => `${i === 3 || i === 6 ? '<div class="tsep"></div>' : ""}<button class="tbtn" data-tool="${t.id}" title="${t.label}（${t.key}）"><i class="ti ${t.icon}"></i></button>`).join("")}
+      </nav>
 
-      <div id="loader"><div class="ld-ring"></div><div class="ld-text">準備中…</div></div>
+      <aside id="dock">
+        <section class="dsec" id="dsec-intake"><h3><i class="ti ti-folder-open"></i> 読み込み</h3><div id="dock-intake"></div></section>
+        <section class="dsec" id="dsec-transform">
+          <h3><i class="ti ti-axis-x"></i> 原点と向き <span class="dim">Blender と同じ Z-up の数値</span></h3>
+          <div id="dock-transform"></div>
+        </section>
+        <section class="dsec" id="dsec-dims">
+          <h3><i class="ti ti-dimensions"></i> 寸法 <label class="chk"><input type="checkbox" id="dims-chk"> ビューに表示</label></h3>
+          <div class="dims-grid"><span>幅 X</span><b id="dim-w">—</b><span>奥行 Y</span><b id="dim-d">—</b><span>高さ Z</span><b id="dim-h">—</b></div>
+          <div class="dim-note">外れた粒を除いた本体のおよその大きさ</div>
+          <div id="measure-box" class="hidden">
+            <div class="dim-row">計測 <b id="measured">—</b></div>
+            <div class="dim-row">この長さを <input id="real-m" type="number" step="0.01" min="0.001" placeholder="m"> m に <button class="sbtn" id="real-go">適用</button></div>
+          </div>
+        </section>
+        <section class="dsec grow" id="dsec-history"><h3><i class="ti ti-history"></i> 編集履歴 <span class="dim">クリックで戻る</span></h3><div id="dock-history"></div></section>
+        <section class="dsec" id="dsec-export">
+          <div class="exp-row"><select id="exp-fmt"><option value="spz">.spz（小さい）</option><option value="ply">.ply（汎用）</option><option value="splat">.splat（基本色のみ）</option></select></div>
+          <button class="cta big" id="exp-go"><i class="ti ti-download"></i> 書き出し</button>
+          <div class="dim-note">消した粒と、原点・向き・大きさの修正を焼き込んだファイルを保存します</div>
+        </section>
+      </aside>
 
-      <div id="topleft">
-        <div id="console">
-          <div id="con-bar"></div>
-          <div id="con-text"></div>
-        </div>
-        <div id="thumb"><img id="thumb-img" alt="入力画像"></div>
-      </div>
-
-      <div id="orb"><span class="dot"></span><button class="ico" id="o-help" title="ヘルプ"><i class="ti ti-help"></i></button></div>
-
-      <div id="panel-bake" class="panel glass">
-        <h3><i class="ti ti-folder-open"></i> 読み込み</h3>
-        <div id="bakemount"></div>
-      </div>
+      <footer id="status"><span id="st-hint"></span><span id="st-msg"></span><span id="st-sel"></span><span id="st-pill">no scene</span></footer>
+      <input type="file" id="file-pick" accept=".ply,.spz,.splat,.ksplat,.sog" class="hidden">
     `;
+    // overlays live in the stage (over the canvas, under the dock)
+    const ov = document.createElement("div"); ov.id = "overlay";
+    ov.innerHTML = `
+      <div id="selrect" class="hidden"></div>
+      <div id="selcircle" class="hidden"></div>
+      <svg id="lasso" class="hidden"><path d=""></path></svg>
+      <div id="numinput" class="hidden"></div>
+      <div id="ctxmenu" class="hidden">
+        <button data-act="delete"><i class="ti ti-trash"></i>選択を削除<kbd>X</kbd></button>
+        <button data-act="deselect"><i class="ti ti-square-off"></i>選択を解除<kbd>Alt+A</kbd></button>
+        <button data-act="selectAll"><i class="ti ti-square-check"></i>すべて選択<kbd>A</kbd></button>
+        <hr>
+        <button data-act="focus"><i class="ti ti-zoom-in-area"></i>ここへ寄る</button>
+      </div>
+      <div id="loader"><div class="ld-ring"></div><div class="ld-text">読み込み中…</div></div>
+    `;
+    stage.appendChild(ov);
 
-    this.scenePill = ui.querySelector("#scenePill")!;
+    const q = <T extends HTMLElement>(id: string) => (ui.querySelector("#" + id) || ov.querySelector("#" + id)) as T;
+    this.mounts = { intake: q("dock-intake"), transform: q("dock-transform"), history: q("dock-history"), overlay: ov };
+    this.hint = q("st-hint"); this.msg = q("st-msg"); this.pill = q("st-pill"); this.selPill = q("st-sel");
+    this.loader = q("loader"); this.rect = q("selrect"); this.circle = q("selcircle");
+    this.lassoSvg = q("lasso"); this.lasso = this.lassoSvg.querySelector("path") as SVGPathElement;
+    this.ctx = q("ctxmenu"); this.numEl = q("numinput"); this.orthoTag = q("orthotag");
+    this.fmtSel = q("exp-fmt"); this.filePick = q("file-pick");
+    this.dims = { w: q("dim-w"), d: q("dim-d"), h: q("dim-h"), chk: q("dims-chk"), measured: q("measured"), real: q("real-m"), box: q("measure-box") };
 
-    this.navBtns = Array.from(ui.querySelectorAll("#navmode [data-nav]")) as HTMLButtonElement[];
-    this.navBtns.forEach((b) => (b.onclick = () => cb.onMode(b.dataset.nav as "orbit" | "fly")));
-
-    const bakeP = ui.querySelector("#panel-bake") as HTMLElement;
-    const toggleBake = () => bakeP.classList.toggle("open");
-    (ui.querySelector("#topLoad") as HTMLElement).onclick = toggleBake;
-    (ui.querySelector("#r-frame") as HTMLButtonElement).onclick = () => cb.onTogglePanel("frame");
-    // paint mode: 消しゴム (paint → delete)
-    const cleanBtn = ui.querySelector("#r-clean") as HTMLButtonElement;
-    const cleanBar = ui.querySelector("#cleanbar") as HTMLElement;
-    let editMode: "clean" | "none" = "none";
-    this.setEditUI = (mode) => {
-      if (mode === editMode) return;
-      editMode = mode;
-      cleanBtn.classList.toggle("on", mode === "clean");
-      cleanBar.classList.toggle("show", mode === "clean");
-      cb.onEditMode(mode);
-    };
-    cleanBtn.onclick = () => this.setEditUI(editMode === "clean" ? "none" : "clean");
-    (ui.querySelector("#cb-undo") as HTMLButtonElement).onclick = () => cb.onUndo();
-    (ui.querySelector("#cb-redo") as HTMLButtonElement).onclick = () => cb.onRedo();
-    (ui.querySelector("#cb-all") as HTMLButtonElement).onclick = () => cb.onRestoreAll();
-    const noiseStr = ui.querySelector("#cb-noise-str") as HTMLInputElement;
-    (ui.querySelector("#cb-noise") as HTMLButtonElement).onclick = () => cb.onRemoveNoise(+noiseStr.value);
-    (ui.querySelector("#cb-autoclean") as HTMLButtonElement).onclick = () => cb.onAutoClean();
-    const cbBrush = ui.querySelector("#cb-brush") as HTMLInputElement;
-    cbBrush.oninput = () => cb.onBrushSize(+cbBrush.value);
-
-    // export lives behind a popover so a stray click can't fire it by accident
-    const expMenu = ui.querySelector("#exportmenu") as HTMLElement;
-    const expFmt = ui.querySelector("#exp-fmt") as HTMLSelectElement;
-    const closeExp = () => expMenu.classList.remove("open");
-    (ui.querySelector("#a-export") as HTMLButtonElement).onclick = (e) => { e.stopPropagation(); expMenu.classList.toggle("open"); };
-    expMenu.addEventListener("click", (e) => e.stopPropagation());
-    document.addEventListener("click", () => closeExp()); // click anywhere else closes it
-    (ui.querySelector("#x-gs") as HTMLButtonElement).onclick = () => { cb.onExportGS(expFmt.value); closeExp(); };
-    (ui.querySelector("#c-recenter") as HTMLButtonElement).onclick = () => cb.onRecenter();
-
-    // theme toggle (design.md: data-theme + localStorage; dark is the app default)
-    const TKEY = "gseditor-theme";
-    const applyTheme = (t: string) => { document.documentElement.dataset.theme = t; try { localStorage.setItem(TKEY, t); } catch { /* ignore */ } cb.onTheme(t as "dark" | "light"); };
-    let saved: string | null = null;
-    try { saved = localStorage.getItem(TKEY); } catch { /* ignore */ }
-    applyTheme(saved || "dark");
-    (ui.querySelector("#themeBtn") as HTMLButtonElement).onclick = () => applyTheme(document.documentElement.dataset.theme === "light" ? "dark" : "light");
-
-    this.console = ui.querySelector("#console") as HTMLElement;
-    this.conText = ui.querySelector("#con-text") as HTMLElement;
-    this.conBar = ui.querySelector("#con-bar") as HTMLElement;
-    this.thumb = ui.querySelector("#thumb") as HTMLElement;
-    this.thumbImg = ui.querySelector("#thumb-img") as HTMLImageElement;
-    this.loader = ui.querySelector("#loader") as HTMLElement;
-    this.intake = new IntakePanel(ui.querySelector("#bakemount") as HTMLElement, cb.onLoadResult, (t) => this.setConsole(t));
-
-    view.addEventListener("dragover", (e) => e.preventDefault());
-    view.addEventListener("drop", (e) => {
-      e.preventDefault();
-      const files = Array.from(e.dataTransfer?.files ?? []); if (!files.length) return;
-      this.intake.handleFiles(files);
+    for (const t of TOOLS) {
+      const b = ui.querySelector(`[data-tool="${t.id}"]`) as HTMLButtonElement;
+      this.toolBtns.set(t.id, b);
+      b.onclick = () => cb.onTool(t.id);
+    }
+    const fm = q("filemenu"), fl = q("file-list");
+    q<HTMLButtonElement>("file-btn").onclick = (e) => { e.stopPropagation(); fm.classList.toggle("open"); };
+    document.addEventListener("click", () => fm.classList.remove("open"));
+    fl.addEventListener("click", (e) => {
+      const b = (e.target as HTMLElement).closest("button") as HTMLButtonElement | null; if (!b) return;
+      fm.classList.remove("open");
+      const a = b.dataset.act!;
+      if (a === "open") this.filePick.click();
+      else if (a.startsWith("export-")) cb.onExport(a.slice(7));
+      else if (a === "restore-all") cb.onRestoreAll();
+      else if (a === "frame-all") cb.onFrameAll();
     });
-
-    // keyboard: Esc leaves the eraser; Ctrl+Z / Ctrl+Shift+Z (Ctrl+Y) walk the edit history
-    window.addEventListener("keydown", (e) => {
-      const t = e.target as HTMLElement | null; // typing in a field → no shortcuts
-      if (t && (t.tagName === "INPUT" || t.tagName === "SELECT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
-      if ((e.ctrlKey || e.metaKey) && e.code === "KeyZ") { e.preventDefault(); if (e.shiftKey) cb.onRedo(); else cb.onUndo(); }
-      else if ((e.ctrlKey || e.metaKey) && e.code === "KeyY") { e.preventDefault(); cb.onRedo(); }
-      else if (e.code === "Escape") { if (cleanBtn.classList.contains("on")) this.setEditUI("none"); }
+    this.filePick.onchange = () => { const f = this.filePick.files?.[0]; if (f) cb.onOpenFile(f); this.filePick.value = ""; };
+    q<HTMLButtonElement>("exp-go").onclick = () => cb.onExport(this.fmtSel.value);
+    this.dims.chk.onchange = () => cb.onDimsVisible(this.dims.chk.checked);
+    const applyReal = () => { const v = parseFloat(this.dims.real.value); if (v > 0) cb.onMeasureApply(v); };
+    q<HTMLButtonElement>("real-go").onclick = applyReal;
+    this.dims.real.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Enter") applyReal(); };
+    this.ctx.addEventListener("click", (e) => {
+      const b = (e.target as HTMLElement).closest("button") as HTMLButtonElement | null; if (!b || b.disabled) return;
+      this.hideContextMenu(); cb.onContext(b.dataset.act as CtxAction);
     });
+    document.addEventListener("pointerdown", (e) => { if (!this.ctx.contains(e.target as Node)) this.hideContextMenu(); }, { capture: true });
+    // theme: follows the system until chosen here
+    const TKEY = "gseditor-theme-choice";
+    const sysDark = matchMedia("(prefers-color-scheme: dark)");
+    const apply = (t: string, save: boolean) => { document.documentElement.dataset.theme = t; if (save) { try { localStorage.setItem(TKEY, t); } catch { /* ignore */ } } cb.onTheme(t as "dark" | "light"); };
+    let saved: string | null = null; try { saved = localStorage.getItem(TKEY); localStorage.removeItem("gseditor-theme"); } catch { /* ignore */ }
+    apply(saved || (sysDark.matches ? "dark" : "light"), false);
+    sysDark.addEventListener("change", () => { try { if (!localStorage.getItem(TKEY)) apply(sysDark.matches ? "dark" : "light", false); } catch { /* ignore */ } });
+    q<HTMLButtonElement>("themeBtn").onclick = () => apply(document.documentElement.dataset.theme === "light" ? "dark" : "light", true);
+    window.addEventListener("keydown", (e) => { if ((e.ctrlKey || e.metaKey) && e.code === "KeyO") { e.preventDefault(); this.filePick.click(); } });
   }
 
-  /** Show the intake panel (load a GS file). */
-  openIntake() { (this.ui.querySelector("#panel-bake") as HTMLElement).classList.add("open"); }
-
-  /** Centre-of-view loading animation. */
-  setLoading(b: boolean) { this.loader.classList.toggle("show", b); }
-
-  /** Reflect the active nav mode in the bottom-right cluster (WASD auto-fly / Esc auto-orbit). */
-  setNavMode(m: "orbit" | "fly") { this.navBtns.forEach((b) => b.classList.toggle("on", b.dataset.nav === m)); }
+  setTool(t: Tool) { for (const [id, b] of this.toolBtns) b.classList.toggle("on", id === t); }
+  setHint(text: string) { this.hint.textContent = text; }
+  /** A transient message in the status bar (ms = 0 keeps it until the next message). */
+  setMessage(text: string, ms = 4000) {
+    window.clearTimeout(this.msgTimer);
+    this.msg.textContent = text; this.msg.classList.add("show");
+    if (ms > 0) this.msgTimer = window.setTimeout(() => this.msg.classList.remove("show"), ms);
+  }
   setScene(name: string, splats: number) {
-    const t = `${name} · ${splats.toLocaleString()} splats`;
-    if (t !== this.lastPill) { this.lastPill = t; this.scenePill.textContent = t; } // called every frame: touch the DOM only on change
+    const t = splats ? `${name} · ${splats.toLocaleString()} 粒` : "no scene";
+    if (t !== this.lastPill) { this.lastPill = t; this.pill.textContent = t; }
   }
+  setSelection(n: number) { this.selPill.textContent = n ? `選択 ${n.toLocaleString()} 粒` : ""; }
+  setLoading(b: boolean) { this.loader.classList.toggle("show", b); }
+  setOrtho(b: boolean) { this.orthoTag.textContent = b ? "平行投影" : "透視"; }
+  setDims(d: { w: number; d: number; h: number } | null) {
+    const f = (v: number) => `${v.toFixed(2)} m`;
+    this.dims.w.textContent = d ? f(d.w) : "—"; this.dims.d.textContent = d ? f(d.d) : "—"; this.dims.h.textContent = d ? f(d.h) : "—";
+  }
+  setMeasured(m: number | null) {
+    this.dims.box.classList.toggle("hidden", m == null);
+    if (m != null) { this.dims.measured.textContent = `${m.toFixed(3)} m`; this.dims.real.value = ""; }
+  }
+  get exportFormat() { return this.fmtSel.value; }
 
-  /** Floating top-left console — newest line on top, older lines below (rises upward). */
-  setConsole(text: string) {
-    const t = (text || "").trim();
-    if (!t) { this.console.classList.remove("show"); this.conText.textContent = ""; return; }
-    this.conText.textContent = t.split("\n").reverse().join("\n"); // newest first (top)
-    this.console.classList.add("show");
-    this.conText.scrollTop = 0; // newest is at the top
+  // ── selection overlays (viewport pixel coords) ──
+  showRect(x0: number, y0: number, x1: number, y1: number) {
+    Object.assign(this.rect.style, { left: `${Math.min(x0, x1)}px`, top: `${Math.min(y0, y1)}px`, width: `${Math.abs(x1 - x0)}px`, height: `${Math.abs(y1 - y0)}px` });
+    this.rect.classList.remove("hidden");
   }
-
-  /** Show a small preview of the dropped still (top-left; slides below the console when it appears). */
-  setThumb(url: string | null) {
-    if (this.prevThumbUrl) { URL.revokeObjectURL(this.prevThumbUrl); this.prevThumbUrl = null; }
-    if (!url) { this.thumb.classList.remove("show"); this.thumbImg.removeAttribute("src"); return; }
-    this.prevThumbUrl = url;
-    this.thumbImg.src = url;
-    this.thumb.classList.add("show");
+  hideRect() { this.rect.classList.add("hidden"); }
+  showCircle(x: number, y: number, r: number) {
+    Object.assign(this.circle.style, { left: `${x}px`, top: `${y}px`, width: `${r * 2}px`, height: `${r * 2}px` });
+    this.circle.classList.remove("hidden");
   }
-
-  /** Drive the load bar pinned to the console's top edge (null = hide). */
-  setProgress(pct: number | null) {
-    if (pct == null) { this.conBar.classList.remove("show"); this.conBar.style.width = "0%"; return; }
-    this.conBar.classList.add("show");
-    this.conBar.style.width = `${Math.max(0, Math.min(100, pct))}%`;
+  hideCircle() { this.circle.classList.add("hidden"); }
+  showLasso(pts: { x: number; y: number }[]) {
+    this.lassoSvg.classList.remove("hidden");
+    this.lasso.setAttribute("d", pts.length ? "M" + pts.map((p) => `${p.x},${p.y}`).join(" L") + " Z" : "");
   }
+  hideLasso() { this.lassoSvg.classList.add("hidden"); }
+  setNumInput(text: string | null) { this.numEl.classList.toggle("hidden", !text); this.numEl.textContent = text || ""; }
+  showContextMenu(x: number, y: number, hasSelection: boolean) {
+    this.ctx.classList.remove("hidden");
+    this.ctx.querySelectorAll<HTMLButtonElement>("[data-act=delete],[data-act=deselect]").forEach((b) => (b.disabled = !hasSelection));
+    const r = this.stage.getBoundingClientRect();
+    const w = this.ctx.offsetWidth, h = this.ctx.offsetHeight;
+    this.ctx.style.left = `${Math.max(0, Math.min(x - r.left, r.width - w - 4))}px`;
+    this.ctx.style.top = `${Math.max(0, Math.min(y - r.top, r.height - h - 4))}px`;
+  }
+  hideContextMenu() { this.ctx.classList.add("hidden"); }
 }
