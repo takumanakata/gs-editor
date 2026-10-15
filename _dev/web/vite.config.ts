@@ -2,7 +2,7 @@ import { defineConfig } from "vite";
 import os from "node:os";
 import path from "node:path";
 
-// Keep Vite's dependency cache OUTSIDE Dropbox. Dropbox locks files in
+// Keep Vite's dependency cache outside the repo: a cloud-synced folder locks files in
 // node_modules/.vite mid-rename during dep optimization, which fails with EBUSY.
 const cacheDir = path.join(
   process.env.LOCALAPPDATA || os.tmpdir(),
