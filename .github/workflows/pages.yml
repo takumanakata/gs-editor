@@ -26,7 +26,9 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: _dev/web/package-lock.json
-      - run: npm --prefix _dev/web ci
+      # npm install, not ci: the lock written by the local npm 12 lists nested deps in a
+      # shape the runner's npm 10 rejects ("Missing: esbuild@0.28 from lock file")
+      - run: npm --prefix _dev/web install --no-audit --no-fund
       - run: npm --prefix _dev/web run typecheck
       - run: npm --prefix _dev/web test
       - run: npm --prefix _dev/web run build
