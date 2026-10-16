@@ -1,10 +1,5 @@
 node_modules/
 dist/
-.venv/
-__pycache__/
-*.pyc
 01_Assets/
 *.log
-.pytest_cache/
-*.pt
 .claude/
