@@ -74,9 +74,9 @@ async function boot() {
     onTheme: (t) => scene.setBackground(t === "light" ? 0xd9dad4 : 0x0e110d),
     onContext: (a) => {
       if (a === "delete") deleteSelection();
-      else if (a === "invert") { for (const o of shownObjects()) o.edit.invertSelection(); syncSelection(); }
+      else if (a === "invert") { for (const o of shownObjects()) o.edit.invertSelection(); syncSelection(); activateSelectionOwner(); }
       else if (a === "deselect") deselectAll();
-      else if (a === "selectAll") { for (const o of shownObjects()) o.edit.selectAll(); syncSelection(); }
+      else if (a === "selectAll") { for (const o of shownObjects()) o.edit.selectAll(); syncSelection(); activateSelectionOwner(); }
       else if (a === "focus") { const p = pickAt(ctxAt.x, ctxAt.y); if (p) nav.focusOn(p.point); }
       else if (a === "setOrigin") { const p = pickAt(ctxAt.x, ctxAt.y); const o = activeObj(); if (p && o) setOriginAt(o, p.point); else editor.setMessage(o ? "Nothing under the cursor — right-click on the scan" : "Make an object active first"); }
     },
@@ -200,7 +200,7 @@ async function boot() {
   };
 
   // ── selection gestures (left button) — on every shown object ──
-  type Gesture = { kind: SelectVariant; x0: number; y0: number; mode: SelectMode; pts: { x: number; y: number }[]; moved: boolean };
+  type Gesture = { kind: SelectVariant; x0: number; y0: number; mode: SelectMode; pts: { x: number; y: number }[]; moved: boolean; caught: number };
   let gesture: Gesture | null = null;
   let circleR = 40;
   const local = (e: PointerEvent) => { const r = viewRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
@@ -210,6 +210,38 @@ async function boot() {
   const syncSelection = () => editor.setSelection(selectedCount());
   const deselectAll = () => { for (const o of objects) o.edit.deselectAll(); syncSelection(); };
   const eachShown = (fn: (o: GsObject) => void) => { for (const o of shownObjects()) fn(o); };
+  /**
+   * Which scan is under a click, from the projected splats (call projectNow() first).
+   * "busy" while a scan is still being prepared: then a click must not count as empty.
+   */
+  const objectUnder = (clientX: number, clientY: number): GsObject | null | "busy" => {
+    if (shownObjects().some((o) => !o.edit.ready)) return "busy";
+    const r = viewRect(), x = clientX - r.left, y = clientY - r.top;
+    const hits = shownObjects().filter((o) => o.edit.hitNear(x, y, 6));
+    const near = pickAt(clientX, clientY)?.obj ?? null;   // nearest along the ray, when the sampled pick finds one
+    if (!hits.length) return near;
+    return near && hits.includes(near) ? near : hits[0];
+  };
+  /** A plain click: drop the splat selection; the scan under the cursor becomes active, empty space clears it. */
+  const clickAt = (clientX: number, clientY: number) => {
+    deselectAll();
+    const u = objectUnder(clientX, clientY);
+    if (u === "busy") return;
+    if (u) { if (activeObj() !== u) setActive({ kind: "object", obj: u }); }
+    else setActive(null);
+  };
+  /**
+   * After splats get selected, the scan they belong to is the active one (unless the
+   * active scan already has a selection) — so the panels never point elsewhere while
+   * the user is cleaning a scan, whatever was active before (nothing, or a volume).
+   */
+  const activateSelectionOwner = () => {
+    const cur = activeObj();
+    if (cur && cur.edit.selectedCount) return;
+    let best: GsObject | null = null;
+    for (const o of shownObjects()) if (o.edit.selectedCount && (!best || o.edit.selectedCount > best.edit.selectedCount)) best = o;
+    if (best) setActive({ kind: "object", obj: best });
+  };
   let clickDown: { x: number; y: number } | null = null;
   dom.addEventListener("pointerdown", (e) => {
     editor.hideContextMenu();
@@ -217,10 +249,10 @@ async function boot() {
     if (GIZMO_TOOLS.includes(tool)) { if ((gizmo as any).axis == null) clickDown = { x: e.clientX, y: e.clientY }; return; }
     const p = local(e);
     projectNow();
-    gesture = { kind: variant, x0: p.x, y0: p.y, mode: modeOf(e), pts: [p], moved: false };
+    gesture = { kind: variant, x0: p.x, y0: p.y, mode: modeOf(e), pts: [p], moved: false, caught: 0 };
     try { dom.setPointerCapture(e.pointerId); } catch { /* synthetic pointer */ }
     if (gesture.mode === "set") for (const o of objects) o.edit.deselectAll();   // plain drag starts a fresh selection
-    if (gesture.kind === "circle") { eachShown((o) => o.edit.selectCircle(p.x, p.y, circleR, e.ctrlKey ? "sub" : "add")); syncSelection(); }
+    if (gesture.kind === "circle") { const g0 = gesture; eachShown((o) => { g0.caught += o.edit.selectCircle(p.x, p.y, circleR, e.ctrlKey ? "sub" : "add"); }); syncSelection(); }
     e.preventDefault();
   });
   dom.addEventListener("pointermove", (e) => {
@@ -239,16 +271,17 @@ async function boot() {
       if (Math.hypot(e.clientX - c.x, e.clientY - c.y) < 4 && !gizmo.dragging) {
         const hit = pickAt(e.clientX, e.clientY);
         if (tool === "origin") { const o = activeObj(); if (hit && o) setOriginAt(o, hit.point); }
-        else { deselectAll(); if (!hit) setActive(null); }
+        else { projectNow(); clickAt(e.clientX, e.clientY); }
       }
     }
     const g = gesture; if (!g) return; gesture = null;
     const p = local(e);
-    if (g.kind === "box") { if (g.moved) eachShown((o) => o.edit.selectRect(g.x0, g.y0, p.x, p.y, g.mode)); else if (g.mode === "set") { deselectAll(); if (!pickAt(e.clientX, e.clientY)) setActive(null); } }
-    else if (g.kind === "lasso") { if (g.moved && g.pts.length >= 3) eachShown((o) => o.edit.selectLasso(g.pts, g.mode)); else if (!g.moved && g.mode === "set") { deselectAll(); if (!pickAt(e.clientX, e.clientY)) setActive(null); } }
-    else if (!g.moved && g.mode === "set" && !pickAt(e.clientX, e.clientY)) { deselectAll(); setActive(null); }
+    if (g.kind === "box") { if (g.moved) eachShown((o) => o.edit.selectRect(g.x0, g.y0, p.x, p.y, g.mode)); else if (g.mode === "set") clickAt(e.clientX, e.clientY); }
+    else if (g.kind === "lasso") { if (g.moved && g.pts.length >= 3) eachShown((o) => o.edit.selectLasso(g.pts, g.mode)); else if (!g.moved && g.mode === "set") clickAt(e.clientX, e.clientY); }
+    else if (!g.moved && g.mode === "set" && !g.caught) clickAt(e.clientX, e.clientY);   // a dab that caught splats keeps them
     editor.hideRect(); editor.hideLasso();
     syncSelection();
+    activateSelectionOwner();
   };
   dom.addEventListener("pointerup", endGesture);
   dom.addEventListener("pointercancel", endGesture);
@@ -267,7 +300,10 @@ async function boot() {
   function deleteSelection() {
     const batches = shownObjects().map((o) => ({ o, idx: o.edit.selectedIndices() })).filter((b) => b.idx.length);
     if (!batches.length) { editor.setMessage("Nothing selected"); return; }
+    const owner = batches.reduce((a, b) => (b.idx.length > a.idx.length ? b : a)).o;
+    const cur = activeObj();
     const done = batches.map((b) => ({ o: b.o, batch: b.o.edit.hide(b.idx) }));
+    if (!cur || !batches.some((b) => b.o === cur)) setActive({ kind: "object", obj: owner });
     const n = done.reduce((a, b) => a + b.batch.length, 0);
     history.push({ label: `削除 (${n.toLocaleString()} 粒)`, undo: () => { for (const d of done) d.o.edit.restore(d.batch); afterEdit(); }, redo: () => { for (const d of done) d.o.edit.hide(d.batch); afterEdit(); } });
     afterEdit();
@@ -489,7 +525,7 @@ async function boot() {
     const ctrl = e.ctrlKey || e.metaKey;
     if (ctrl && e.code === "KeyZ") { e.preventDefault(); if (e.shiftKey) redo(); else undo(); return; }
     if (ctrl && e.code === "KeyY") { e.preventDefault(); redo(); return; }
-    if (ctrl && e.code === "KeyI") { e.preventDefault(); eachShown((o) => o.edit.invertSelection()); syncSelection(); return; }
+    if (ctrl && e.code === "KeyI") { e.preventDefault(); eachShown((o) => o.edit.invertSelection()); syncSelection(); activateSelectionOwner(); return; }
     if (ctrl && e.code === "KeyA") { e.preventDefault(); const o = activeObj(); if (o) { frameOp(o, "トランスフォームを適用", () => o.frame.applyTransform()); editor.setMessage("Applied: this placement is now 0 / 0 / 1"); } return; }
     if (ctrl && e.code === "Numpad1") { viewFrom("back"); return; }
     if (ctrl && e.code === "Numpad3") { viewFrom("left"); return; }
@@ -526,7 +562,7 @@ async function boot() {
       case "KeyR": setTool("rotate"); return;
       case "KeyS": setTool("scale"); return;
       case "KeyO": setTool("origin"); return;
-      case "KeyA": eachShown((o) => o.edit.selectAll()); syncSelection(); return;
+      case "KeyA": eachShown((o) => o.edit.selectAll()); syncSelection(); activateSelectionOwner(); return;
       case "KeyX": case "Delete": deleteSelection(); return;
       case "BracketLeft": circleR = Math.max(6, circleR / 1.2); return;
       case "BracketRight": circleR = Math.min(400, circleR * 1.2); return;

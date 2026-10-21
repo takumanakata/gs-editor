@@ -190,6 +190,21 @@ export class SplatEditor {
     }
   }
 
+  /**
+   * Is any shown splat within `r` px of (x, y) in the last projection? Exact — every splat,
+   * not a sample — so a click on a huge scan is never mistaken for empty space.
+   */
+  hitNear(x: number, y: number, r: number): boolean {
+    if (!this._ready) return false;
+    const r2 = r * r;
+    for (let i = 0; i < this.n; i++) {
+      if (!this.svis[i]) continue;
+      const dx = this.sx[i] - x, dy = this.sy[i] - y;
+      if (dx * dx + dy * dy <= r2) return true;
+    }
+    return false;
+  }
+
   // ── selection ──────────────────────────────────────────────────────────
   private setSel(i: number, on: boolean) {
     if (!!this.selFlag[i] === on) return;
