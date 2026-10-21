@@ -239,8 +239,49 @@ async function boot() {
     if (!hits.length) return near;
     return near && hits.includes(near) ? near : hits[0];
   };
-  /** A plain click: drop the splat selection; the scan under the cursor becomes active, empty space clears it. */
+  // ── clip volumes are picked by their outline (what is drawn), like a wire in Blender ──
+  const RING = Array.from({ length: 65 }, (_, i) => [Math.cos((i / 64) * Math.PI * 2), Math.sin((i / 64) * Math.PI * 2)]);
+  const BOX_EDGES = [[0, 1], [2, 3], [4, 5], [6, 7], [0, 2], [1, 3], [4, 6], [5, 7], [0, 4], [1, 5], [2, 6], [3, 7]];
+  /** The outline of a volume as world-space segments (box: 12 edges; sphere: the three drawn great circles). */
+  const outlineOf = (v: ClipVolume): [THREE.Vector3, THREE.Vector3][] => {
+    const c = v.center, out: [THREE.Vector3, THREE.Vector3][] = [];
+    if (v.kind === "box") {
+      const h = v.size.clone().multiplyScalar(0.5);
+      const k = Array.from({ length: 8 }, (_, i) => new THREE.Vector3(c.x + (i & 1 ? h.x : -h.x), c.y + (i & 2 ? h.y : -h.y), c.z + (i & 4 ? h.z : -h.z)));
+      for (const [a, b] of BOX_EDGES) out.push([k[a], k[b]]);
+    } else {
+      const r = v.radius;
+      const planes = [(a: number, b: number) => new THREE.Vector3(c.x + a * r, c.y + b * r, c.z), (a: number, b: number) => new THREE.Vector3(c.x + a * r, c.y, c.z + b * r), (a: number, b: number) => new THREE.Vector3(c.x, c.y + b * r, c.z + a * r)];
+      for (const f of planes) for (let i = 0; i < 64; i++) out.push([f(RING[i][0], RING[i][1]), f(RING[i + 1][0], RING[i + 1][1])]);
+    }
+    return out;
+  };
+  /** The shown volume whose outline passes within `tol` px of the cursor (nearest wins). */
+  const volumeAt = (clientX: number, clientY: number, tol = 7): ClipVolume | null => {
+    const r = viewRect(), x = clientX - r.left, y = clientY - r.top, cam = scene.activeCamera, t = new THREE.Vector3();
+    const px = (w: THREE.Vector3) => { t.copy(w).project(cam); return t.z < -1 || t.z > 1 ? null : [(t.x * 0.5 + 0.5) * r.width, (-t.y * 0.5 + 0.5) * r.height]; };
+    let best: ClipVolume | null = null, bestD = tol;
+    for (const v of volumes) {
+      if (!v.enabled || !v.showBounds) continue;
+      for (const [a, b] of outlineOf(v)) {
+        const pa = px(a), pb = px(b); if (!pa || !pb) continue;
+        const dx = pb[0] - pa[0], dy = pb[1] - pa[1], L = dx * dx + dy * dy;
+        const u = L ? Math.max(0, Math.min(1, ((x - pa[0]) * dx + (y - pa[1]) * dy) / L)) : 0;
+        const d = Math.hypot(pa[0] + u * dx - x, pa[1] + u * dy - y);
+        if (d < bestD) { bestD = d; best = v; }
+      }
+    }
+    return best;
+  };
+  let hoverVol: ClipVolume | null = null;
+  const setHoverVol = (v: ClipVolume | null) => { if (v === hoverVol) return; hoverVol = v; dom.style.cursor = v ? "pointer" : ""; refreshVolumeLook(); };
+  /**
+   * A plain click: drop the splat selection; what is under the cursor becomes active —
+   * a volume's outline first (it is drawn on top), then a scan; empty space clears it.
+   */
   const clickAt = async (clientX: number, clientY: number) => {
+    const v = volumeAt(clientX, clientY);
+    if (v) { await deselectAll(); if (activeVol() !== v) setActive({ kind: "volume", vol: v }); return; }
     await deselectAll();
     const u = await objectUnder(clientX, clientY);
     if (u === "busy") return;
@@ -277,21 +318,32 @@ async function boot() {
       .then(() => { g.painting = false; syncSelection(); paint(g); }));
   };
   let clickDown: { x: number; y: number } | null = null;
-  dom.addEventListener("pointerdown", (e) => {
-    editor.hideContextMenu();
-    if (e.button !== 0 || nav.isBlocked() || !objects.length) return;
-    if (GIZMO_TOOLS.includes(tool)) { if ((gizmo as any).axis == null) clickDown = { x: e.clientX, y: e.clientY }; return; }
-    const p = local(e);
+  let outlineDown: { x: number; y: number; mode: SelectMode } | null = null;
+  const beginGesture = (clientX: number, clientY: number, mode: SelectMode) => {
+    const r = viewRect(), p = { x: clientX - r.left, y: clientY - r.top };
     projectNow();
-    const g: Gesture = { kind: variant, x0: p.x, y0: p.y, mode: modeOf(e), pts: [p], moved: false, caught: 0, ops: [], dabs: [], last: p, painting: false };
+    const g: Gesture = { kind: variant, x0: p.x, y0: p.y, mode, pts: [p], moved: false, caught: 0, ops: [], dabs: [], last: p, painting: false };
     gesture = g;
-    try { dom.setPointerCapture(e.pointerId); } catch { /* synthetic pointer */ }
     if (g.mode === "set") g.ops.push(...objects.map((o) => o.data.deselectAll()));   // plain drag starts a fresh selection
     if (g.kind === "circle") { g.dabs.push(p.x, p.y); paint(g); }
+  };
+  dom.addEventListener("pointerdown", (e) => {
+    editor.hideContextMenu();
+    if (e.button !== 0 || nav.isBlocked() || (!objects.length && !volumes.length)) return;
+    if (GIZMO_TOOLS.includes(tool)) { if ((gizmo as any).axis == null) clickDown = { x: e.clientX, y: e.clientY }; return; }
+    try { dom.setPointerCapture(e.pointerId); } catch { /* synthetic pointer */ }
+    if (volumeAt(e.clientX, e.clientY)) outlineDown = { x: e.clientX, y: e.clientY, mode: modeOf(e) };
+    else beginGesture(e.clientX, e.clientY, modeOf(e));
     e.preventDefault();
   });
   dom.addEventListener("pointermove", (e) => {
     if (tool === "select" && variant === "circle" && !nav.isBlocked()) { const p = local(e); editor.showCircle(p.x, p.y, circleR); }
+    if (!e.buttons && !gesture && !outlineDown) setHoverVol(nav.isBlocked() ? null : volumeAt(e.clientX, e.clientY));
+    if (outlineDown) {
+      if (Math.hypot(e.clientX - outlineDown.x, e.clientY - outlineDown.y) < 3) return;
+      const o = outlineDown; outlineDown = null;
+      beginGesture(o.x, o.y, o.mode);   // it was a drag after all: select splats from where it started
+    }
     if (!gesture) return;
     const p = local(e);
     if (!gesture.moved && Math.hypot(p.x - gesture.x0, p.y - gesture.y0) < 3) return;
@@ -308,6 +360,7 @@ async function boot() {
         else { projectNow(); await clickAt(e.clientX, e.clientY); }
       }
     }
+    if (outlineDown) { outlineDown = null; await clickAt(e.clientX, e.clientY); return; }   // a click on a volume's outline
     const g = gesture; if (!g) return; gesture = null;
     const p = local(e);
     editor.hideRect(); editor.hideLasso();
@@ -331,7 +384,7 @@ async function boot() {
   const endSafely = (e: PointerEvent) => { endGesture(e).catch((err) => { if (!/disposed/.test(String(err))) console.error(err); }); };
   dom.addEventListener("pointerup", endSafely);
   dom.addEventListener("pointercancel", endSafely);
-  dom.addEventListener("pointerleave", () => editor.hideCircle());
+  dom.addEventListener("pointerleave", () => { editor.hideCircle(); setHoverVol(null); });
   dom.addEventListener("wheel", (e) => {
     if (!(tool === "select" && variant === "circle" && e.shiftKey)) return;
     e.preventDefault(); e.stopImmediatePropagation();
@@ -409,6 +462,7 @@ async function boot() {
 
   // ── clip volumes ──
   const VOL_BLUE = 0x1c7fb0; // C4D-ish deep blue
+  const VOL_HOVER = 0x62c2ee; // the same blue, lit: the outline under the cursor (click to select)
   function addVolume(kind: VolumeKind) {
     const n = volumes.filter((x) => x.kind === kind).length + 1;
     const v: ClipVolume = { id: nextId++, name: `${kind === "box" ? "BoxVolume" : "SphereVolume"} ${n}`, kind, center: new THREE.Vector3(), size: new THREE.Vector3(2, 2, 2), radius: 1, mode: "inside", enabled: true, showBounds: true };
@@ -441,7 +495,15 @@ async function boot() {
     if (activeVol() === v) setActive(objects.length ? { kind: "object", obj: objects[objects.length - 1] } : null);
     scheduleClip(); refreshOutliner();
   }
-  const refreshVolumeLook = () => { for (const v of volumes) { const h = volumeHelpers.get(v.id); if (!h) continue; h.visible = v.showBounds && v.enabled; const fill = h.getObjectByName("fill"); if (fill) fill.visible = activeVol() === v; } const av = activeVol(); if (av) editor.setVolumeShow(av.showBounds); };
+  const refreshVolumeLook = () => {
+    for (const v of volumes) {
+      const h = volumeHelpers.get(v.id); if (!h) continue;
+      h.visible = v.showBounds && v.enabled;
+      const fill = h.getObjectByName("fill"); if (fill) fill.visible = activeVol() === v;
+      h.traverse((c) => { if ((c as THREE.Line).isLine) ((c as THREE.Line).material as THREE.LineBasicMaterial).color.setHex(hoverVol === v ? VOL_HOVER : VOL_BLUE); });
+    }
+    const av = activeVol(); if (av) editor.setVolumeShow(av.showBounds);
+  };
   function volumeChanged(v: ClipVolume, _commit: boolean) {
     const h = volumeHelpers.get(v.id);
     if (h) { h.position.copy(v.center); if (v.kind === "box") h.scale.copy(v.size); else h.scale.setScalar(v.radius); }

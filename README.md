@@ -22,6 +22,7 @@
 | | |
 |---|---|
 | 選択 | Shift で追加、Ctrl で除外、A で全選択、Alt+A で解除、Ctrl+I で反転。丸は Shift＋ホイールで大きさ |
+| ビューで選ぶ | シーンの粒や Volume の線をクリックすると、それが選ばれる（Outliner で選ぶのと同じ） |
 | Clip Volume | 左の箱／球ボタン。範囲の外（または内）を一時的に隠して、中を掃除しやすくする。書き出しには影響しない |
 | 複数ファイル | 何枚でも読み込める。右の Outliner で切り替え、Export で1つのファイルにまとまる |
 | Transform パネル | Blender と同じ Z-up の値。Ctrl+A（Apply Transform）で今の位置・向きを 0 にする |
