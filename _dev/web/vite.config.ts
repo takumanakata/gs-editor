@@ -18,4 +18,6 @@ export default defineConfig({
   publicDir: "../../01_Assets",
   server: { open: true, port: 5173 },
   build: { target: "esnext" },
+  // each scan's worker (viewer/scanWorker.ts) imports a module, so bundle workers as ES modules
+  worker: { format: "es" },
 });

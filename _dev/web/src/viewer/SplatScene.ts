@@ -1,18 +1,21 @@
 import * as THREE from "three";
-import { SparkRenderer, SplatMesh } from "@sparkjsdev/spark";
+import { PackedSplats, SparkRenderer, SplatMesh } from "@sparkjsdev/spark";
 import { computeStartFrame, type StartFrame } from "./startFrame";
 
 /**
  * Spark inside the three.js scene, holding any number of GS meshes (one per object).
  * Each mesh is parented under the root the caller hands in (the object's transform
  * group). `prepare()` sorts everything once per frame.
+ *
+ * Reading and drawing are separate: `read()` gives the splats (CPU), `add()` draws a set
+ * of splats — for a big scan that is a thinned copy (see ScanData), never the whole file.
  */
 export class SplatScene {
   /** Viewer convention: file (OpenCV, Y-down) → view (Y-up) is a 180° turn about X. */
   static readonly FILE_FLIP = new THREE.Quaternion(1, 0, 0, 0);
   private spark: SparkRenderer;
   readonly meshes: SplatMesh[] = [];
-  /** First view of the most recently loaded file (shared rule with the Layouter, see startFrame.ts). */
+  /** First view of the first scan (shared rule with the Layouter, see startFrame.ts). */
   startFrame: StartFrame | null = null;
 
   constructor(renderer: THREE.WebGLRenderer, private scene: THREE.Scene) {
@@ -23,30 +26,39 @@ export class SplatScene {
 
   prepare(camera: THREE.Camera) { this.spark.update({ scene: this.scene, camera }); }
 
-  /** Load a GS file (.ply/.spz/.splat/.ksplat/.sog) under `root`. Resolves once it is on-GPU. */
-  async load(url: string, root: THREE.Object3D): Promise<SplatMesh> {
-    const mesh = new SplatMesh({ url });
+  /** Read a GS file (.ply/.spz/.splat/.ksplat/.sog) into CPU splats. `fileName` tells the format of a blob: URL. */
+  async read(url: string, fileName: string): Promise<PackedSplats> {
+    const ps = new PackedSplats({ url, fileName });
+    await ps.initialized;
+    return ps;
+  }
+
+  /** Draw `packed` under `root`. */
+  async add(packed: PackedSplats, root: THREE.Object3D): Promise<SplatMesh> {
+    const mesh = new SplatMesh({ packedSplats: packed });
     await mesh.initialized;
     // GS files are typically OpenCV convention (Y-down); flip 180° about X to sit upright
     // in three.js Y-up. The viewer's convention, not part of the user's correction: the
     // export removes it again (see FILE_FLIP).
     mesh.quaternion.copy(SplatScene.FILE_FLIP);
-    mesh.raycastable = true;
     root.add(mesh);
     mesh.updateMatrixWorld(true);
     this.meshes.push(mesh);
-    this.startFrame = computeStartFrame(mesh.packedSplats as any, mesh.matrixWorld);
     return mesh;
   }
 
+  /** The first view, from the splats being drawn (a thinned copy frames the same). */
+  computeStart(packed: PackedSplats, mesh: SplatMesh) { this.startFrame = computeStartFrame(packed as any, mesh.matrixWorld); }
+
+  /** Stop drawing a mesh. Its splats belong to the caller (ScanData) and are left alone. */
   remove(mesh: SplatMesh) {
     const i = this.meshes.indexOf(mesh);
     if (i >= 0) this.meshes.splice(i, 1);
     mesh.removeFromParent();
+    const m = mesh as any;
+    m.packedSplats = undefined; m.splats = undefined; m.extSplats = undefined;
     mesh.dispose();
   }
-
-  clear() { for (const m of [...this.meshes]) this.remove(m); this.startFrame = null; }
 
   /** World-space bounding box of one mesh (or of all of them). */
   getBoundsWorld(mesh?: SplatMesh): THREE.Box3 | null {
@@ -59,7 +71,4 @@ export class SplatScene {
     }
     return any ? box : null;
   }
-
-  static countOf(m: SplatMesh): number { return (m as any).splats?.getNumSplats?.() ?? (m as any).packedSplats?.numSplats ?? 0; }
-  get splatCount(): number { return this.meshes.reduce((a, m) => a + SplatScene.countOf(m), 0); }
 }

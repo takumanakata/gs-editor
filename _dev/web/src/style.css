@@ -151,3 +151,4 @@ html[data-theme="dark"] .ic-sun{display:none;} html[data-theme="light"] .ic-moon
 .vc-front{transform:translateZ(26px);} .vc-back{transform:rotateY(180deg) translateZ(26px);}
 .vc-right{transform:rotateY(90deg) translateZ(26px);} .vc-left{transform:rotateY(-90deg) translateZ(26px);}
 .vc-top{transform:rotateX(90deg) translateZ(26px);} .vc-bottom{transform:rotateX(-90deg) translateZ(26px);}
+#st-busy{color:var(--accent); flex:0 0 auto;} #st-busy .ti{display:inline-block; animation:spin 1s linear infinite;}

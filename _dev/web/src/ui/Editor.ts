@@ -15,9 +15,12 @@ export interface EditorCallbacks {
   onAddVolume: (kind: VolumeKind) => void;
   onDimsVisible: (on: boolean) => void;
   onVolumeShow: (on: boolean) => void;
+  /** Draw the active scan whole (true) or thinned (false). */
+  onDisplay: (full: boolean) => void;
 }
 
-export interface SceneInfo { name: string; format: string; bytes: number; total: number; visible: number; sceneTotal: number }
+/** `drawn`: splats actually drawn for this scan; `light`: thinned now (null = small enough to always draw whole). */
+export interface SceneInfo { name: string; format: string; bytes: number; total: number; visible: number; sceneTotal: number; drawn: number; light: boolean | null; sceneDrawn: number }
 export interface ObjectRow { id: number; name: string; visible: boolean; active: boolean; splats: number; kind: "object" | VolumeKind }
 
 const VARIANTS: { id: SelectVariant; icon: string; label: string }[] = [
@@ -46,7 +49,7 @@ export class Editor {
   readonly mounts: { intake: HTMLElement; transform: HTMLElement; volume: HTMLElement; history: HTMLElement; overlay: HTMLElement };
   private toolBtns = new Map<Tool, HTMLButtonElement>();
   private selBtn: HTMLButtonElement; private flyout: HTMLElement;
-  private hint: HTMLElement; private msg: HTMLElement; private selPill: HTMLElement;
+  private hint: HTMLElement; private msg: HTMLElement; private selPill: HTMLElement; private busy: HTMLElement;
   private msgTimer = 0;
   private loader: HTMLElement;
   private rect: HTMLElement; private circle: HTMLElement; private lassoSvg: HTMLElement; private lasso: SVGPathElement;
@@ -55,7 +58,7 @@ export class Editor {
   private dims: { w: HTMLElement; d: HTMLElement; h: HTMLElement; chk: HTMLInputElement };
   private volShow: HTMLInputElement;
   private dimLbls: HTMLElement[];
-  private info: { name: HTMLElement; format: HTMLElement; size: HTMLElement; splats: HTMLElement; note: HTMLElement; replace: HTMLButtonElement };
+  private info: { name: HTMLElement; format: HTMLElement; size: HTMLElement; splats: HTMLElement; note: HTMLElement; replace: HTMLButtonElement; dispRow: HTMLElement; disp: HTMLSelectElement };
   private objList: HTMLElement;
   private fmtSel: HTMLSelectElement;
   private replacePick: HTMLInputElement;
@@ -98,6 +101,7 @@ export class Editor {
           <h3><i class="ti ti-chevron-down"></i>Info</h3>
           <div class="dbody">
             <div class="kv"><span>File</span><b id="inf-name">—</b><span>Format</span><b id="inf-format">—</b><span>Size</span><b id="inf-size">—</b><span>Splats</span><b id="inf-splats">—</b></div>
+            <div class="vp-row hidden" id="inf-disp-row" title="Big scans are drawn thinned so the view stays smooth. Selecting, deleting and export always use every splat."><label>Display</label><select id="inf-disp"><option value="light">Light</option><option value="full">Full (every splat)</option></select></div>
             <button class="sbtn wide" id="inf-replace" title="Load another file into this object, keeping its transform and origin"><i class="ti ti-replace"></i> Replace File…</button>
             <div class="note" id="inf-note">Up to ~1M splats is comfortable in the browser; 3M+ gets heavy.</div>
           </div>
@@ -109,7 +113,7 @@ export class Editor {
         </section>
       </aside>
 
-      <div id="status" class="glass"><span id="st-hint"></span><span id="st-msg"></span><span id="st-sel"></span></div>
+      <div id="status" class="glass"><span id="st-hint"></span><span id="st-msg"></span><span id="st-busy" class="hidden"><i class="ti ti-loader-2"></i> Working…</span><span id="st-sel"></span></div>
 
       <div id="overlay">
         <div id="selrect" class="hidden"></div>
@@ -134,7 +138,7 @@ export class Editor {
     const ov = q("overlay");
     this.mounts = { intake: q("dock-intake"), transform: q("dock-transform"), volume: q("dock-volume"), history: q("dock-history"), overlay: ov };
     ui.querySelectorAll<HTMLButtonElement>("#tools [data-add]").forEach((b) => (b.onclick = () => cb.onAddVolume(b.dataset.add as VolumeKind)));
-    this.hint = q("st-hint"); this.msg = q("st-msg"); this.selPill = q("st-sel");
+    this.hint = q("st-hint"); this.msg = q("st-msg"); this.selPill = q("st-sel"); this.busy = q("st-busy");
     this.loader = q("loader"); this.rect = q("selrect"); this.circle = q("selcircle");
     this.lassoSvg = q("lasso"); this.lasso = this.lassoSvg.querySelector("path") as SVGPathElement;
     this.ctx = q("ctxmenu"); this.numEl = q("numinput");
@@ -145,7 +149,7 @@ export class Editor {
     this.volShow.onchange = () => cb.onVolumeShow(this.volShow.checked);
     for (const id of ["dsec-dims", "dsec-info", "dsec-history"]) q(id).classList.add("closed"); // collapsed by default
     this.dimLbls = Array.from(ov.querySelectorAll(".dimlbl")) as HTMLElement[];
-    this.info = { name: q("inf-name"), format: q("inf-format"), size: q("inf-size"), splats: q("inf-splats"), note: q("inf-note"), replace: q("inf-replace") };
+    this.info = { name: q("inf-name"), format: q("inf-format"), size: q("inf-size"), splats: q("inf-splats"), note: q("inf-note"), replace: q("inf-replace"), dispRow: q("inf-disp-row"), disp: q("inf-disp") as HTMLSelectElement };
     this.objList = q("obj-list");
     this.selBtn = q("t-select"); this.flyout = q("flyout");
 
@@ -180,6 +184,9 @@ export class Editor {
     ui.querySelectorAll<HTMLElement>(".dsec:not(.pinned) h3").forEach((h) => (h.onclick = (e) => { if ((e.target as HTMLElement).closest("label,input,button")) return; h.parentElement!.classList.toggle("closed"); }));
     // replace / export / dims
     this.info.replace.onclick = () => this.replacePick.click();
+    this.info.disp.onchange = () => cb.onDisplay(this.info.disp.value === "full");
+    // a dropdown keeps keyboard focus after a pick, which mutes the shortcuts (X, Ctrl+Z …) until the next click
+    for (const sel of Array.from(ui.querySelectorAll("select"))) sel.addEventListener("change", () => (sel as HTMLSelectElement).blur());
     this.replacePick.onchange = () => { const f = this.replacePick.files?.[0]; if (f) cb.onReplaceFile(f); this.replacePick.value = ""; };
     q<HTMLButtonElement>("exp-go").onclick = () => cb.onExport(this.fmtSel.value);
     // objects
@@ -221,6 +228,8 @@ export class Editor {
     this.msg.textContent = text; this.msg.classList.add("show");
     if (ms > 0) this.msgTimer = window.setTimeout(() => this.msg.classList.remove("show"), ms);
   }
+  /** A quiet "Working…" while a big scan is being processed in the background. */
+  setBusy(b: boolean) { this.busy.classList.toggle("hidden", !b); }
   setSelection(n: number) { this.selPill.textContent = n ? `${n.toLocaleString()} selected` : ""; }
   setLoading(b: boolean) { this.loader.classList.toggle("show", b); }
   get dimsVisible() { return this.dims.chk.checked; }
@@ -239,15 +248,22 @@ export class Editor {
   }
   setInfo(i: SceneInfo | null) {
     this.info.replace.disabled = !i;
-    if (!i) { this.info.name.textContent = "—"; this.info.format.textContent = "—"; this.info.size.textContent = "—"; this.info.splats.textContent = "—"; return; }
+    if (!i) { this.info.name.textContent = "—"; this.info.format.textContent = "—"; this.info.size.textContent = "—"; this.info.splats.textContent = "—"; this.info.dispRow.classList.add("hidden"); return; }
     this.info.name.textContent = i.name; this.info.name.title = i.name;
     this.info.format.textContent = i.format.toUpperCase();
     this.info.size.textContent = i.bytes ? `${(i.bytes / 1048576).toFixed(1)} MB` : "—";
     this.info.splats.textContent = i.visible === i.total ? i.total.toLocaleString() : `${i.visible.toLocaleString()} / ${i.total.toLocaleString()}`;
-    const n = i.sceneTotal;
-    this.info.note.textContent = n > 3_000_000 ? `${(n / 1e6).toFixed(1)}M splats in the scene: heavy in the browser — expect lag; thin the scans if you can.`
-      : n > 1_000_000 ? `${(n / 1e6).toFixed(1)}M splats in the scene: workable, selection may take a moment.`
-      : "Up to ~1M splats is comfortable in the browser; 3M+ gets heavy.";
+    const M = (v: number) => (v >= 1e6 ? `${(v / 1e6).toFixed(1)}M` : `${Math.round(v / 1000)}k`);
+    this.info.dispRow.classList.toggle("hidden", i.light === null);
+    if (i.light !== null) {
+      this.info.disp.value = i.light ? "light" : "full";
+      (this.info.disp.options[0] as HTMLOptionElement).text = i.light ? `Light (${M(i.drawn)} drawn)` : "Light";
+    }
+    const d = i.sceneDrawn;
+    this.info.note.textContent = i.light ? `Drawing ${M(i.drawn)} of ${M(i.total)} splats so the view stays smooth. Selecting, deleting and export use every splat.`
+      : d > 3_000_000 ? `Drawing ${M(d)} splats: heavy in the browser — expect lag.`
+      : d > 1_000_000 ? `Drawing ${M(d)} splats: workable.`
+      : "Up to ~1M drawn splats is comfortable in the browser; 3M+ gets heavy. Big scans are drawn thinned automatically.";
   }
   setObjects(rows: ObjectRow[]) {
     const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;");

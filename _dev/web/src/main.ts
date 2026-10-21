@@ -6,7 +6,7 @@ import { Scene } from "./viewer/Scene";
 import { SplatScene } from "./viewer/SplatScene";
 import { NavControls, type ViewName } from "./viewer/NavControls";
 import { ViewCube } from "./viewer/ViewCube";
-import { SplatEditor, type SelectMode } from "./viewer/SplatEditor";
+import { ScanData, LIGHT_MAX, type SelectMode, type VolDesc } from "./viewer/ScanData";
 import { SceneFrame, type FrameJSON } from "./viewer/SceneFrame";
 import { History } from "./viewer/History";
 import { HistoryPanel } from "./ui/HistoryPanel";
@@ -26,7 +26,7 @@ const GIZMO_TOOLS: Tool[] = ["move", "rotate", "scale", "origin"];
 const VARIANT_ORDER: SelectVariant[] = ["box", "circle", "lasso"];
 
 /** A loaded scan: its own transform (with origin), its splats and its per-splat edit state. */
-interface GsObject { id: number; name: string; source: { url: string; file?: File; name: string }; mesh: SplatMesh; frame: SceneFrame; edit: SplatEditor; visible: boolean }
+interface GsObject { id: number; name: string; source: { url: string; file?: File; name: string }; mesh: SplatMesh; frame: SceneFrame; data: ScanData; visible: boolean }
 type Active = { kind: "object"; obj: GsObject } | { kind: "volume"; vol: ClipVolume } | null;
 
 const HINTS: Record<string, string> = {
@@ -53,6 +53,12 @@ async function boot() {
   const history = new History();
   const dom = scene.renderer.domElement;
 
+  // Big scans are drawn thinned (ScanData). Dev: ?light=<max drawn splats> to try it on a small file.
+  const devQ = new URLSearchParams(import.meta.env.DEV ? location.search : "");
+  const lightMax = Number(devQ.get("light")) || LIGHT_MAX;
+  if (devQ.get("thin") === "stride") ScanData.thin = "stride";
+  if (devQ.get("bump")) ScanData.bumpExp = Number(devQ.get("bump"));
+
   // ── scene contents ──
   const objects: GsObject[] = [];
   const volumes: ClipVolume[] = [];
@@ -73,26 +79,30 @@ async function boot() {
     onExport: (fmt) => void exportGS(fmt as GsFormat),
     onTheme: (t) => scene.setBackground(t === "light" ? 0xd9dad4 : 0x0e110d),
     onContext: (a) => {
-      if (a === "delete") deleteSelection();
-      else if (a === "invert") { for (const o of shownObjects()) o.edit.invertSelection(); syncSelection(); activateSelectionOwner(); }
-      else if (a === "deselect") deselectAll();
-      else if (a === "selectAll") { for (const o of shownObjects()) o.edit.selectAll(); syncSelection(); activateSelectionOwner(); }
+      if (a === "delete") void deleteSelection();
+      else if (a === "invert") void selOp((o) => o.data.invert());
+      else if (a === "deselect") void deselectAll();
+      else if (a === "selectAll") void selOp((o) => o.data.selectAll());
       else if (a === "focus") { const p = pickAt(ctxAt.x, ctxAt.y); if (p) nav.focusOn(p.point); }
       else if (a === "setOrigin") { const p = pickAt(ctxAt.x, ctxAt.y); const o = activeObj(); if (p && o) setOriginAt(o, p.point); else editor.setMessage(o ? "Nothing under the cursor — right-click on the scan" : "Make an object active first"); }
     },
     onObject: (a, id) => {
       const o = objects.find((x) => x.id === id), v = volumes.find((x) => x.id === id);
       if (a === "activate") setActive(o ? { kind: "object", obj: o } : v ? { kind: "volume", vol: v } : null);
-      else if (a === "toggle") { if (o) { o.visible = !o.visible; o.frame.root.visible = o.visible; o.edit.deselectAll(); } if (v) v.enabled = !v.enabled; scheduleClip(); refreshOutliner(); syncSelection(); }
+      else if (a === "toggle") { if (o) { o.visible = !o.visible; o.frame.root.visible = o.visible; void o.data.deselectAll().then(syncSelection); } if (v) v.enabled = !v.enabled; scheduleClip(); refreshOutliner(); syncSelection(); }
       else if (a === "remove") { if (o) removeObject(o); if (v) removeVolume(v); }
     },
     onAddVolume: (kind) => addVolume(kind),
     onDimsVisible: () => { dimsBox.visible = editor.dimsVisible && !!lastBox; },
     onVolumeShow: (on) => { const v = activeVol(); if (v) { v.showBounds = on; volumeChanged(v, true); } },
+    onDisplay: (full) => { const o = activeObj(); if (o) void setDisplay(o, full); },
   }, stage, ui);
   const intake = new IntakePanel(editor.mounts.intake, (url, file) => void addObject(url, file.name, file), (t) => editor.setMessage(t));
   stage.addEventListener("dragover", (e) => e.preventDefault());
   stage.addEventListener("drop", (e) => { e.preventDefault(); const files = Array.from(e.dataTransfer?.files ?? []); if (files.length) intake.handleFiles(files); });
+
+  // a note while a big scan is being worked on (selecting, deleting, clipping run in workers)
+  ScanData.onBusy = (busy) => editor.setBusy(busy);
 
   // ── view cube / axis views / ortho / guides ──
   let cubeDrag: { x: number; y: number } | null = null;
@@ -183,9 +193,9 @@ async function boot() {
     ray.setFromCamera(ndc, scene.activeCamera);
     let best: { point: THREE.Vector3; obj: GsObject } | null = null, bestD = Infinity;
     for (const o of shownObjects()) {
-      if (!o.edit.ready) continue;
+      if (!o.data.ready) continue;
       o.mesh.updateMatrixWorld(true);
-      const p = o.edit.pickRay(ray.ray, o.mesh.matrixWorld);
+      const p = o.data.pickRay(ray.ray, o.mesh.matrixWorld);
       if (!p) continue;
       const d = p.distanceTo(ray.ray.origin);
       if (d < bestD) { bestD = d; best = { point: p, obj: o }; }
@@ -194,38 +204,45 @@ async function boot() {
   };
   nav.pivotProvider = (x, y) => {
     const c = new THREE.Vector3(); let n = 0;
-    for (const o of shownObjects()) { const s = o.edit.selectionCenter(o.mesh.matrixWorld); if (s) { c.addScaledVector(s, o.edit.selectedCount); n += o.edit.selectedCount; } }
+    for (const o of shownObjects()) { const s = o.data.selectionCenter(o.mesh.matrixWorld); if (s) { c.addScaledVector(s, o.data.selected); n += o.data.selected; } }
     if (n) return c.multiplyScalar(1 / n);
     return pickAt(x, y)?.point ?? null;
   };
 
-  // ── selection gestures (left button) — on every shown object ──
-  type Gesture = { kind: SelectVariant; x0: number; y0: number; mode: SelectMode; pts: { x: number; y: number }[]; moved: boolean; caught: number };
+  // ── selection gestures (left button) — on every shown object, decided at full resolution in each scan's worker ──
+  type Pt = { x: number; y: number };
+  type Gesture = { kind: SelectVariant; x0: number; y0: number; mode: SelectMode; pts: Pt[]; moved: boolean; caught: number; ops: Promise<unknown>[]; dabs: number[]; last: Pt; painting: boolean };
   let gesture: Gesture | null = null;
   let circleR = 40;
   const local = (e: PointerEvent) => { const r = viewRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
   const modeOf = (e: PointerEvent): SelectMode => (e.ctrlKey ? "sub" : e.shiftKey ? "add" : "set");
-  const projectNow = () => { const r = viewRect(); for (const o of shownObjects()) { o.mesh.updateMatrixWorld(true); o.edit.project(scene.activeCamera, r.width, r.height, o.mesh.matrixWorld); } };
-  const selectedCount = () => objects.reduce((a, o) => a + o.edit.selectedCount, 0);
+  /** Project every shown scan for the current camera (queued in each worker ahead of the tests that use it). */
+  const projectNow = () => { const r = viewRect(); for (const o of shownObjects()) { o.mesh.updateMatrixWorld(true); void o.data.project(scene.activeCamera, o.mesh.matrixWorld, r.width, r.height); } };
+  const selectedCount = () => objects.reduce((a, o) => a + o.data.selected, 0);
   const syncSelection = () => editor.setSelection(selectedCount());
-  const deselectAll = () => { for (const o of objects) o.edit.deselectAll(); syncSelection(); };
-  const eachShown = (fn: (o: GsObject) => void) => { for (const o of shownObjects()) fn(o); };
+  /** Wait for every scan's queued work (counts and selection are current afterwards). */
+  const settle = () => Promise.all(objects.map((o) => o.data.idle()));
+  const deselectAll = async () => { await Promise.all(objects.map((o) => o.data.deselectAll())); syncSelection(); };
+  const selOp = async (fn: (o: GsObject) => Promise<unknown>) => { await Promise.all(shownObjects().map(fn)); syncSelection(); activateSelectionOwner(); };
   /**
-   * Which scan is under a click, from the projected splats (call projectNow() first).
-   * "busy" while a scan is still being prepared: then a click must not count as empty.
+   * Which scan is under a click, from the projected splats (projectNow() first) — every
+   * splat, not a sample. "busy" while a scan is still being prepared: then a click must
+   * not count as empty space.
    */
-  const objectUnder = (clientX: number, clientY: number): GsObject | null | "busy" => {
-    if (shownObjects().some((o) => !o.edit.ready)) return "busy";
+  const objectUnder = async (clientX: number, clientY: number): Promise<GsObject | null | "busy"> => {
+    const list = shownObjects();
+    if (list.some((o) => !o.data.ready)) return "busy";
     const r = viewRect(), x = clientX - r.left, y = clientY - r.top;
-    const hits = shownObjects().filter((o) => o.edit.hitNear(x, y, 6));
+    const flags = await Promise.all(list.map((o) => o.data.hit(x, y, 6)));
+    const hits = list.filter((_, i) => flags[i]);
     const near = pickAt(clientX, clientY)?.obj ?? null;   // nearest along the ray, when the sampled pick finds one
     if (!hits.length) return near;
     return near && hits.includes(near) ? near : hits[0];
   };
   /** A plain click: drop the splat selection; the scan under the cursor becomes active, empty space clears it. */
-  const clickAt = (clientX: number, clientY: number) => {
-    deselectAll();
-    const u = objectUnder(clientX, clientY);
+  const clickAt = async (clientX: number, clientY: number) => {
+    await deselectAll();
+    const u = await objectUnder(clientX, clientY);
     if (u === "busy") return;
     if (u) { if (activeObj() !== u) setActive({ kind: "object", obj: u }); }
     else setActive(null);
@@ -237,10 +254,27 @@ async function boot() {
    */
   const activateSelectionOwner = () => {
     const cur = activeObj();
-    if (cur && cur.edit.selectedCount) return;
+    if (cur && cur.data.selected) return;
     let best: GsObject | null = null;
-    for (const o of shownObjects()) if (o.edit.selectedCount && (!best || o.edit.selectedCount > best.edit.selectedCount)) best = o;
+    for (const o of shownObjects()) if (o.data.selected && (!best || o.data.selected > best.data.selected)) best = o;
     if (best) setActive({ kind: "object", obj: best });
+  };
+  /**
+   * Circle painting: dabs are sent in batches — while one batch is in the workers, new
+   * dabs collect and go out together — and a fast stroke is filled in between events so
+   * it leaves no gaps.
+   */
+  const paint = (g: Gesture, p?: Pt) => {
+    if (p) {
+      const dx = p.x - g.last.x, dy = p.y - g.last.y, steps = Math.max(1, Math.ceil(Math.hypot(dx, dy) / (circleR * 0.5)));
+      for (let i = 1; i <= steps; i++) g.dabs.push(g.last.x + (dx * i) / steps, g.last.y + (dy * i) / steps);
+      g.last = p;
+    }
+    if (g.painting || !g.dabs.length) return;
+    const pts = g.dabs; g.dabs = []; g.painting = true;
+    const mode = g.mode === "sub" ? "sub" : "add";
+    g.ops.push(Promise.all(shownObjects().map((o) => o.data.select({ kind: "circles", pts, r: circleR }, mode).then((d) => { g.caught += d.changed; })))
+      .then(() => { g.painting = false; syncSelection(); paint(g); }));
   };
   let clickDown: { x: number; y: number } | null = null;
   dom.addEventListener("pointerdown", (e) => {
@@ -249,10 +283,11 @@ async function boot() {
     if (GIZMO_TOOLS.includes(tool)) { if ((gizmo as any).axis == null) clickDown = { x: e.clientX, y: e.clientY }; return; }
     const p = local(e);
     projectNow();
-    gesture = { kind: variant, x0: p.x, y0: p.y, mode: modeOf(e), pts: [p], moved: false, caught: 0 };
+    const g: Gesture = { kind: variant, x0: p.x, y0: p.y, mode: modeOf(e), pts: [p], moved: false, caught: 0, ops: [], dabs: [], last: p, painting: false };
+    gesture = g;
     try { dom.setPointerCapture(e.pointerId); } catch { /* synthetic pointer */ }
-    if (gesture.mode === "set") for (const o of objects) o.edit.deselectAll();   // plain drag starts a fresh selection
-    if (gesture.kind === "circle") { const g0 = gesture; eachShown((o) => { g0.caught += o.edit.selectCircle(p.x, p.y, circleR, e.ctrlKey ? "sub" : "add"); }); syncSelection(); }
+    if (g.mode === "set") g.ops.push(...objects.map((o) => o.data.deselectAll()));   // plain drag starts a fresh selection
+    if (g.kind === "circle") { g.dabs.push(p.x, p.y); paint(g); }
     e.preventDefault();
   });
   dom.addEventListener("pointermove", (e) => {
@@ -263,28 +298,39 @@ async function boot() {
     gesture.moved = true;
     if (gesture.kind === "box") editor.showRect(gesture.x0, gesture.y0, p.x, p.y);
     else if (gesture.kind === "lasso") { gesture.pts.push(p); editor.showLasso(gesture.pts); }
-    else { eachShown((o) => o.edit.selectCircle(p.x, p.y, circleR, e.ctrlKey ? "sub" : "add")); syncSelection(); }
+    else paint(gesture, p);
   });
-  const endGesture = (e: PointerEvent) => {
-    if (clickDown) { // a plain click with a gizmo tool: set the origin (origin tool) or deselect
+  const endGesture = async (e: PointerEvent) => {
+    if (clickDown) { // a plain click with a gizmo tool: set the origin (origin tool) or pick / clear the active scan
       const c = clickDown; clickDown = null;
       if (Math.hypot(e.clientX - c.x, e.clientY - c.y) < 4 && !gizmo.dragging) {
-        const hit = pickAt(e.clientX, e.clientY);
-        if (tool === "origin") { const o = activeObj(); if (hit && o) setOriginAt(o, hit.point); }
-        else { projectNow(); clickAt(e.clientX, e.clientY); }
+        if (tool === "origin") { const hit = pickAt(e.clientX, e.clientY); const o = activeObj(); if (hit && o) setOriginAt(o, hit.point); }
+        else { projectNow(); await clickAt(e.clientX, e.clientY); }
       }
     }
     const g = gesture; if (!g) return; gesture = null;
     const p = local(e);
-    if (g.kind === "box") { if (g.moved) eachShown((o) => o.edit.selectRect(g.x0, g.y0, p.x, p.y, g.mode)); else if (g.mode === "set") clickAt(e.clientX, e.clientY); }
-    else if (g.kind === "lasso") { if (g.moved && g.pts.length >= 3) eachShown((o) => o.edit.selectLasso(g.pts, g.mode)); else if (!g.moved && g.mode === "set") clickAt(e.clientX, e.clientY); }
-    else if (!g.moved && g.mode === "set" && !g.caught) clickAt(e.clientX, e.clientY);   // a dab that caught splats keeps them
     editor.hideRect(); editor.hideLasso();
+    const shown = shownObjects();
+    if (g.kind === "box") {
+      if (g.moved) { const rect = { kind: "rect" as const, l: Math.min(g.x0, p.x), t: Math.min(g.y0, p.y), r: Math.max(g.x0, p.x), b: Math.max(g.y0, p.y) }; g.ops.push(...shown.map((o) => o.data.select(rect, g.mode))); }
+      else if (g.mode === "set") g.ops.push(clickAt(e.clientX, e.clientY));
+    } else if (g.kind === "lasso") {
+      if (g.moved && g.pts.length >= 3) { const pts = g.pts.flatMap((q) => [q.x, q.y]); g.ops.push(...shown.map((o) => o.data.select({ kind: "lasso", pts }, g.mode))); }
+      else if (!g.moved && g.mode === "set") g.ops.push(clickAt(e.clientX, e.clientY));
+    } else {
+      let seen: number;
+      do { seen = g.ops.length; await Promise.all(g.ops); } while (g.ops.length !== seen || g.painting || g.dabs.length);
+      if (!g.moved && g.mode === "set" && !g.caught) g.ops.push(clickAt(e.clientX, e.clientY));   // a dab that caught splats keeps them
+    }
+    await Promise.all(g.ops);
     syncSelection();
     activateSelectionOwner();
   };
-  dom.addEventListener("pointerup", endGesture);
-  dom.addEventListener("pointercancel", endGesture);
+  // a scan removed mid-gesture rejects its queued work: nothing to do then
+  const endSafely = (e: PointerEvent) => { endGesture(e).catch((err) => { if (!/disposed/.test(String(err))) console.error(err); }); };
+  dom.addEventListener("pointerup", endSafely);
+  dom.addEventListener("pointercancel", endSafely);
   dom.addEventListener("pointerleave", () => editor.hideCircle());
   dom.addEventListener("wheel", (e) => {
     if (!(tool === "select" && variant === "circle" && e.shiftKey)) return;
@@ -297,15 +343,18 @@ async function boot() {
   dom.addEventListener("contextmenu", (e) => { e.preventDefault(); ctxAt = { x: e.clientX, y: e.clientY }; editor.showContextMenu(e.clientX, e.clientY, selectedCount() > 0, objects.length > 0); });
 
   // ── delete / restore ──
-  function deleteSelection() {
-    const batches = shownObjects().map((o) => ({ o, idx: o.edit.selectedIndices() })).filter((b) => b.idx.length);
-    if (!batches.length) { editor.setMessage("Nothing selected"); return; }
-    const owner = batches.reduce((a, b) => (b.idx.length > a.idx.length ? b : a)).o;
+  async function deleteSelection() {
+    await settle();
+    const list = shownObjects().filter((o) => o.data.selected > 0);
+    if (!list.length) { editor.setMessage("Nothing selected"); return; }
+    const owner = list.reduce((a, b) => (b.data.selected > a.data.selected ? b : a));
     const cur = activeObj();
-    const done = batches.map((b) => ({ o: b.o, batch: b.o.edit.hide(b.idx) }));
-    if (!cur || !batches.some((b) => b.o === cur)) setActive({ kind: "object", obj: owner });
+    if (!cur || !list.includes(cur)) setActive({ kind: "object", obj: owner });
+    const done = await Promise.all(list.map(async (o) => ({ o, batch: await o.data.hideSelected() })));
     const n = done.reduce((a, b) => a + b.batch.length, 0);
-    history.push({ label: `削除 (${n.toLocaleString()} 粒)`, undo: () => { for (const d of done) d.o.edit.restore(d.batch); afterEdit(); }, redo: () => { for (const d of done) d.o.edit.hide(d.batch); afterEdit(); } });
+    history.push({ label: `削除 (${n.toLocaleString()} 粒)`,
+      undo: () => { void Promise.all(done.map((d) => d.o.data.restore(d.batch))).then(afterEdit); },
+      redo: () => { void Promise.all(done.map((d) => d.o.data.hide(d.batch))).then(afterEdit); } });
     afterEdit();
     editor.setMessage(`Deleted ${n.toLocaleString()} splats (Ctrl+Z to undo)`);
   }
@@ -401,22 +450,21 @@ async function boot() {
     if (activeVol() === v) syncProxy();
     scheduleClip(); refreshOutliner();
   }
-  let clipTimer = 0;
-  const scheduleClip = () => { window.clearTimeout(clipTimer); clipTimer = window.setTimeout(applyClip, 30); };
-  function applyClip() {
-    const act = volumes.filter((v) => v.enabled);
-    const pass = act.length ? (x: number, y: number, z: number) => {
-      for (const v of act) {
-        let inside: boolean;
-        if (v.kind === "box") inside = Math.abs(x - v.center.x) <= v.size.x / 2 && Math.abs(y - v.center.y) <= v.size.y / 2 && Math.abs(z - v.center.z) <= v.size.z / 2;
-        else { const dx = x - v.center.x, dy = y - v.center.y, dz = z - v.center.z; inside = dx * dx + dy * dy + dz * dz <= v.radius * v.radius; }
-        if (v.mode === "inside" ? !inside : inside) return false;
-      }
-      return true;
-    } : null;
-    let changed = false;
-    for (const o of objects) { o.mesh.updateMatrixWorld(true); if (o.edit.applyClip(o.mesh.matrixWorld, pass)) changed = true; }
-    if (changed) { splat.prepare(scene.activeCamera); syncSelection(); scheduleDims(); updateInfo(); }
+  let clipTimer = 0, clipRunning = false, clipAgain = false;
+  const scheduleClip = () => { window.clearTimeout(clipTimer); clipTimer = window.setTimeout(() => void applyClip(), 30); };
+  /** Re-evaluate the clip volumes in every scan's worker; a request during a run is folded into one more run. */
+  async function applyClip() {
+    if (clipRunning) { clipAgain = true; return; }
+    clipRunning = true;
+    try {
+      do {
+        clipAgain = false;
+        const vols: VolDesc[] = volumes.filter((v) => v.enabled).map((v) => ({ kind: v.kind, cx: v.center.x, cy: v.center.y, cz: v.center.z, sx: v.size.x, sy: v.size.y, sz: v.size.z, r: v.radius, inside: v.mode === "inside" }));
+        const list = objects.filter((o) => o.data.ready && (vols.length || o.data.clipped));
+        const res = await Promise.all(list.map((o) => { o.mesh.updateMatrixWorld(true); return o.data.clip(o.mesh.matrixWorld.clone(), vols); }));
+        if (res.some(Boolean)) { splat.prepare(scene.activeCamera); syncSelection(); scheduleDims(); updateInfo(); }
+      } while (clipAgain);
+    } finally { clipRunning = false; }
   }
 
   // ── numeric input (G X 1.5 ⏎ …) ──
@@ -451,12 +499,14 @@ async function boot() {
   const dimsBox = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 1, 1)), new THREE.LineBasicMaterial({ color: 0xffa028, transparent: true, opacity: 0.8, depthTest: false }));
   dimsBox.layers.set(1); dimsBox.renderOrder = 997; dimsBox.visible = false; scene.scene.add(dimsBox);
   let dimsTimer = 0, lastBox: THREE.Box3 | null = null;
-  const scheduleDims = () => { window.clearTimeout(dimsTimer); dimsTimer = window.setTimeout(computeDims, 180); };
-  function computeDims() {
-    const o = activeObj();
-    if (!o || !o.edit.ready) { editor.setDims(null); lastBox = null; dimsBox.visible = false; return; }
+  const scheduleDims = () => { window.clearTimeout(dimsTimer); dimsTimer = window.setTimeout(() => void computeDims(), 180); };
+  let dimsSeq = 0;
+  async function computeDims() {
+    const o = activeObj(), my = ++dimsSeq;
+    if (!o || !o.data.ready) { editor.setDims(null); lastBox = null; dimsBox.visible = false; return; }
     o.mesh.updateMatrixWorld(true);
-    const pts = o.edit.sampleCenters(o.mesh.matrixWorld, 60000);
+    const pts = await o.data.sample(o.mesh.matrixWorld.clone(), 60000);
+    if (my !== dimsSeq || activeObj() !== o) return;   // superseded while the worker sampled
     const n = pts.length / 3;
     if (n < 10) { editor.setDims(null); lastBox = null; dimsBox.visible = false; return; }
     const lo = new THREE.Vector3(), hi = new THREE.Vector3();
@@ -496,11 +546,14 @@ async function boot() {
   const updateInfo = () => {
     const o = activeObj();
     if (!o) { editor.setInfo(null); return; }
-    editor.setInfo({ name: o.source.name, format: (o.source.name.split(".").pop() || "").toLowerCase(), bytes: o.source.file?.size ?? 0, total: o.edit.count, visible: o.edit.count - o.edit.hiddenCount, sceneTotal: splat.splatCount });
+    const d = o.data, drawn = d.drawnCount;
+    editor.setInfo({ name: o.source.name, format: (o.source.name.split(".").pop() || "").toLowerCase(), bytes: o.source.file?.size ?? 0, total: d.n, visible: d.n - d.hidden,
+      sceneTotal: objects.reduce((a, x) => a + x.data.n, 0), sceneDrawn: shownObjects().reduce((a, x) => a + x.data.drawnCount, 0),
+      drawn, light: d.n > lightMax ? d.light : null });
   };
   const refreshOutliner = () => {
     const rows: ObjectRow[] = [
-      ...objects.map((o) => ({ id: o.id, name: o.name, visible: o.visible, active: activeObj() === o, splats: o.edit.count, kind: "object" as const })),
+      ...objects.map((o) => ({ id: o.id, name: o.name, visible: o.visible, active: activeObj() === o, splats: o.data.n, kind: "object" as const })),
       ...volumes.map((v) => ({ id: v.id, name: `${v.name}${v.mode === "outside" ? " (keep outside)" : ""}`, visible: v.enabled, active: activeVol() === v, splats: 0, kind: v.kind })),
     ];
     editor.setObjects(rows);
@@ -515,7 +568,7 @@ async function boot() {
     if (GIZMO_TOOLS.includes(tool)) { if (a) { gizmo.attach(proxy); syncProxy(); } else gizmo.detach(); }
     scene.objOrigin.visible = !!o;
     refreshVolumeLook();
-    computeDims(); updateInfo(); refreshOutliner();
+    void computeDims(); updateInfo(); refreshOutliner();
   }
 
   // ── keyboard ──
@@ -525,14 +578,14 @@ async function boot() {
     const ctrl = e.ctrlKey || e.metaKey;
     if (ctrl && e.code === "KeyZ") { e.preventDefault(); if (e.shiftKey) redo(); else undo(); return; }
     if (ctrl && e.code === "KeyY") { e.preventDefault(); redo(); return; }
-    if (ctrl && e.code === "KeyI") { e.preventDefault(); eachShown((o) => o.edit.invertSelection()); syncSelection(); activateSelectionOwner(); return; }
+    if (ctrl && e.code === "KeyI") { e.preventDefault(); void selOp((o) => o.data.invert()); return; }
     if (ctrl && e.code === "KeyA") { e.preventDefault(); const o = activeObj(); if (o) { frameOp(o, "トランスフォームを適用", () => o.frame.applyTransform()); editor.setMessage("Applied: this placement is now 0 / 0 / 1"); } return; }
     if (ctrl && e.code === "Numpad1") { viewFrom("back"); return; }
     if (ctrl && e.code === "Numpad3") { viewFrom("left"); return; }
     if (ctrl && e.code === "Numpad7") { viewFrom("bottom"); return; }
     if (ctrl) return;
     if (e.altKey) {
-      if (e.code === "KeyA") { deselectAll(); e.preventDefault(); }
+      if (e.code === "KeyA") { void deselectAll(); e.preventDefault(); }
       else if (e.code === "KeyG") { clearTransform("location"); e.preventDefault(); }
       else if (e.code === "KeyR") { clearTransform("rotation"); e.preventDefault(); }
       else if (e.code === "KeyS") { clearTransform("scale"); e.preventDefault(); }
@@ -552,7 +605,7 @@ async function boot() {
         if (numText) cancelNumeric();
         else if (axisLock) { axisLock = null; applyAxisLock(); showNumeric(); }
         else if (tool !== "select") setTool("select");
-        else deselectAll();
+        else void deselectAll();
         return;
       case "KeyW": cycleSelect(); return;
       case "KeyB": variant = "box"; setTool("select"); return;
@@ -562,8 +615,8 @@ async function boot() {
       case "KeyR": setTool("rotate"); return;
       case "KeyS": setTool("scale"); return;
       case "KeyO": setTool("origin"); return;
-      case "KeyA": eachShown((o) => o.edit.selectAll()); syncSelection(); activateSelectionOwner(); return;
-      case "KeyX": case "Delete": deleteSelection(); return;
+      case "KeyA": void selOp((o) => o.data.selectAll()); return;
+      case "KeyX": case "Delete": void deleteSelection(); return;
       case "BracketLeft": circleR = Math.max(6, circleR / 1.2); return;
       case "BracketRight": circleR = Math.min(400, circleR * 1.2); return;
       case "Home": frameAll(); return;
@@ -602,19 +655,23 @@ async function boot() {
     editor.setLoading(true);
     const log = (t: string) => editor.setMessage(t, 0);
     try {
-      const parts = list.map((o) => { o.mesh.updateMatrixWorld(true); return { o, part: { rows: o.edit.exportIndices(), matrix: FILE_FLIP_INV.clone().multiply(o.mesh.matrixWorld) } as BakePart }; });
+      await settle();
+      const parts = await Promise.all(list.map(async (o) => { o.mesh.updateMatrixWorld(true); return { o, part: { rows: await o.data.exportRows(), matrix: FILE_FLIP_INV.clone().multiply(o.mesh.matrixWorld) } as BakePart }; }));
       let blob: Blob;
       try {
         const sources: FileSource[] = [];
         for (const { o, part } of parts) {
           const data = o.source.file ? new Uint8Array(await o.source.file.arrayBuffer()) : new Uint8Array(await (await fetch(o.source.url)).arrayBuffer());
-          sources.push({ data, filename: o.source.name, parts: [part], refs: o.edit.refPoints(64) });
+          sources.push({ data, filename: o.source.name, parts: [part], refs: await o.data.refPoints(64) });
         }
         blob = await bakeFiles(sources, fmt, finalName, log);
       } catch (e) {
         console.warn("full-quality export failed, using viewer data:", e);
         editor.setMessage(e instanceof AlignmentError ? "Row order differs from the source: exporting the viewer data (base color only)" : "Could not re-read the source: exporting the viewer data (base color only)", 0);
-        blob = await bakeFromSplats(parts.map(({ o, part }) => ({ packed: (o.mesh as any).packedSplats, rows: part.rows, matrix: part.matrix })), fmt, finalName, log);
+        // the full splats, with any selection tint / delete marks taken off while baking
+        const bake = (i: number): Promise<Blob> => i < parts.length ? parts[i].o.data.withPristine(() => bake(i + 1))
+          : bakeFromSplats(parts.map(({ o, part }) => ({ packed: o.data.full as any, rows: part.rows, matrix: part.matrix })), fmt, finalName, log);
+        blob = await bake(0);
       }
       if (handle) { const w = await handle.createWritable(); await w.write(blob); await w.close(); }
       else downloadBlob(blob, finalName);
@@ -634,21 +691,34 @@ async function boot() {
   function wireFrame(o: GsObject) {
     o.frame.setOnChange(() => { if (activeObj() === o) { panel.setState(o.frame.state); syncProxy(); } scheduleDims(); scheduleClip(); });
   }
+  const M = (v: number) => (v >= 1e6 ? `${(v / 1e6).toFixed(1)}M` : `${Math.round(v / 1000)}k`);
+  /** Read a file, hand it to its worker, and draw it (thinned when big). */
+  async function readScan(url: string, name: string) {
+    const full = await splat.read(url, name);
+    const data = new ScanData(full, true, lightMax);
+    try { await data.init(); } catch (e) { data.dispose(); throw e; }
+    return data;
+  }
+  const loadedNote = (name: string, d: ScanData, extra = "") => d.light
+    ? editor.setMessage(`Loaded ${name}${extra} — ${M(d.n)} splats: drawing the ${M(d.drawnCount)} largest so the view stays smooth. Selecting, deleting and export use every splat (Info → Display: Full draws all).`, 15000)
+    : editor.setMessage(`Loaded ${name}${extra}`);
   async function addObject(url: string, name: string, file?: File) {
     editor.setLoading(true);
     const frame = new SceneFrame(scene.scene);
+    let data: ScanData | null = null;
     try {
-      const mesh = await splat.load(url, frame.root);
-      const edit = new SplatEditor(); edit.analyze(mesh);
-      const o: GsObject = { id: nextId++, name, source: { url, file, name }, mesh, frame, edit, visible: true };
+      data = await readScan(url, name);
+      const mesh = await splat.add(data.display, frame.root);
+      const o: GsObject = { id: nextId++, name, source: { url, file, name }, mesh, frame, data, visible: true };
       objects.push(o);
       wireFrame(o);
-      if (objects.length === 1) { frameStart(); setOrtho(false); scene.setViewMode("persp"); }
+      if (objects.length === 1) { splat.computeStart(data.display, mesh); frameStart(); setOrtho(false); scene.setViewMode("persp"); }
       setActive({ kind: "object", obj: o });
       setTool("select");
       scheduleClip();
-      editor.setMessage(`Loaded ${name}`);
+      loadedNote(name, data);
     } catch (e) {
+      data?.dispose();
       scene.scene.remove(frame.root);
       console.warn("GS load failed:", e);
       editor.setMessage(`Could not load ${name} (damaged, or not a supported format: .ply / .spz / .splat / .ksplat)`, 0);
@@ -660,14 +730,14 @@ async function boot() {
   async function replaceObject(o: GsObject, url: string, name: string, file?: File) {
     editor.setLoading(true);
     try {
-      const mesh = await splat.load(url, o.frame.root);
-      splat.remove(o.mesh);
-      o.mesh = mesh; o.name = name; o.source = { url, file, name };
-      o.edit = new SplatEditor(); o.edit.analyze(mesh);
+      const data = await readScan(url, name);
+      const mesh = await splat.add(data.display, o.frame.root);
+      splat.remove(o.mesh); o.data.dispose();
+      o.mesh = mesh; o.data = data; o.name = name; o.source = { url, file, name };
       history.clear();
       setActive({ kind: "object", obj: o });
       scheduleClip();
-      editor.setMessage(`Replaced with ${name} — transform and origin kept`);
+      loadedNote(name, data, " — transform and origin kept");
     } catch (e) {
       console.warn("GS load failed:", e);
       editor.setMessage(`Could not load ${name}`, 0);
@@ -675,12 +745,28 @@ async function boot() {
   }
   function removeObject(o: GsObject) {
     splat.remove(o.mesh);
+    o.data.dispose();
     scene.scene.remove(o.frame.root);
     objects.splice(objects.indexOf(o), 1);
     history.clear();
     if (activeObj() === o) setActive(objects.length ? { kind: "object", obj: objects[objects.length - 1] } : null);
     else refreshOutliner();
     updateInfo(); scheduleDims();
+  }
+  /** Light ⇄ Full for one scan: rebuild the drawn copy (selection and deletions carry over). */
+  async function setDisplay(o: GsObject, full: boolean) {
+    if (o.data.light === !full || o.data.n <= lightMax) return;
+    editor.setLoading(true);
+    try {
+      const old = o.data.display;
+      const packed = await o.data.setLight(!full);
+      const mesh = await splat.add(packed, o.frame.root);
+      splat.remove(o.mesh); o.data.release(old);
+      o.mesh = mesh;
+      editor.setMessage(full ? `Drawing all ${M(o.data.n)} splats — expect the view to be slow` : `Drawing the ${M(o.data.drawnCount)} largest of ${M(o.data.n)} splats so the view stays smooth`, 6000);
+    } catch (e) {
+      console.error(e); editor.setMessage(`Could not switch the display: ${e}`, 0);
+    } finally { editor.setLoading(false); updateInfo(); }
   }
 
   setTool("select"); setActive(null);
@@ -702,7 +788,7 @@ async function boot() {
   scene.start();
 
   if (import.meta.env.DEV) {
-    (window as any).__pl = { scene, splat, nav, editor, gizmo, cam, history, panel, volPanel, setTool, viewFrom, addObject, addVolume, objects, volumes, exportGS, THREE, bakeFiles, bakeFromSplats, FILE_FLIP_INV,
+    (window as any).__pl = { scene, splat, nav, editor, gizmo, cam, history, panel, volPanel, setTool, viewFrom, addObject, addVolume, objects, volumes, exportGS, THREE, bakeFiles, bakeFromSplats, FILE_FLIP_INV, setDisplay, settle, lightMax,
       get tool() { return tool; }, get variant() { return variant; }, get active() { return active; }, get obj() { return activeObj(); } };
   }
   window.__gseditor_ready = true;
