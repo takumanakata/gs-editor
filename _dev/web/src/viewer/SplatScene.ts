@@ -1,6 +1,9 @@
 import * as THREE from "three";
-import { PackedSplats, SparkRenderer, SplatMesh } from "@sparkjsdev/spark";
+import { PackedSplats, SparkRenderer, SplatFileType, SplatMesh } from "@sparkjsdev/spark";
 import { computeStartFrame, type StartFrame } from "./startFrame";
+
+/** Spark tells .ply / .spz / .sog by their bytes but .splat / .ksplat only by the URL — and a dropped file is a blob: URL with no extension. */
+const TYPE_BY_EXT: Record<string, SplatFileType> = { ply: SplatFileType.PLY, spz: SplatFileType.SPZ, splat: SplatFileType.SPLAT, ksplat: SplatFileType.KSPLAT, sog: SplatFileType.PCSOGSZIP };
 
 /**
  * Spark inside the three.js scene, holding any number of GS meshes (one per object).
@@ -28,7 +31,8 @@ export class SplatScene {
 
   /** Read a GS file (.ply/.spz/.splat/.ksplat/.sog) into CPU splats. `fileName` tells the format of a blob: URL. */
   async read(url: string, fileName: string): Promise<PackedSplats> {
-    const ps = new PackedSplats({ url, fileName });
+    const fileType = TYPE_BY_EXT[(fileName.split(".").pop() || "").toLowerCase()];
+    const ps = new PackedSplats({ url, fileName, fileType });
     await ps.initialized;
     return ps;
   }
